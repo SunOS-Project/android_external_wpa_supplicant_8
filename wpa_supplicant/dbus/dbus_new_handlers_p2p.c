@@ -14,6 +14,7 @@
 #include "../wpa_supplicant_i.h"
 #include "../wps_supplicant.h"
 #include "../notify.h"
+#include "../bss.h"
 #include "dbus_new_helpers.h"
 #include "dbus_new.h"
 #include "dbus_new_handlers.h"
@@ -167,6 +168,13 @@ DBusMessage * wpas_dbus_handler_p2p_find(DBusMessage *message,
 			goto error_clear;
 		wpa_dbus_dict_entry_clear(&entry);
 	}
+
+	max_oper_chwidth = chwidth_freq2_to_ch_width(chwidth, freq2);
+	if (max_oper_chwidth < 0)
+		goto inv_args;
+
+	if (allow_6ghz && chwidth == 40)
+		max_oper_chwidth = CONF_OPER_CHWIDTH_40MHZ_6GHZ;
 
 	wpa_s = wpa_s->global->p2p_init_wpa_s;
 	if (!wpa_s) {
@@ -2465,9 +2473,9 @@ dbus_bool_t wpas_dbus_getter_p2p_group_bssid(
 	u8 *p_bssid;
 
 	if (role == WPAS_P2P_ROLE_CLIENT) {
-		if (wpa_s->current_ssid == NULL)
+		if (!wpa_s->current_bss)
 			return FALSE;
-		p_bssid = wpa_s->current_ssid->bssid;
+		p_bssid = wpa_s->current_bss->bssid;
 	} else {
 		if (wpa_s->ap_iface == NULL)
 			return FALSE;
@@ -2489,9 +2497,9 @@ dbus_bool_t wpas_dbus_getter_p2p_group_frequency(
 	u8 role = wpas_get_p2p_role(wpa_s);
 
 	if (role == WPAS_P2P_ROLE_CLIENT) {
-		if (wpa_s->go_params == NULL)
+		if (!wpa_s->current_bss)
 			return FALSE;
-		op_freq = wpa_s->go_params->freq;
+		op_freq = wpa_s->current_bss->freq;
 	} else {
 		if (wpa_s->ap_iface == NULL)
 			return FALSE;

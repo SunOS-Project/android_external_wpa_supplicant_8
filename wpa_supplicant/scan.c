@@ -261,8 +261,10 @@ static void wpas_trigger_scan_cb(struct wpa_radio_work *work, int deinit)
 			wpa_s->scan_res_handler = NULL;
 		}
 
+#ifndef CONFIG_NO_RRM
 		if (wpa_s->beacon_rep_data.token)
 			wpas_rrm_refuse_request(wpa_s);
+#endif /* CONFIG_NO_RRM */
 
 		return;
 	}
@@ -2253,7 +2255,6 @@ static int wpas_channel_width_offset(enum chan_width cw)
 static int wpas_channel_width_tx_pwr(const u8 *ies, size_t ies_len,
 				     enum chan_width cw)
 {
-#define MIN(a, b) (a < b ? a : b)
 	int offset = wpas_channel_width_offset(cw);
 	const struct element *elem;
 	int max_tx_power = TX_POWER_NO_CONSTRAINT, tx_pwr = 0;
@@ -2329,7 +2330,6 @@ static int wpas_channel_width_tx_pwr(const u8 *ies, size_t ies_len,
 	}
 
 	return max_tx_power;
-#undef MIN
 }
 
 
@@ -2371,7 +2371,6 @@ int wpas_adjust_snr_by_chanwidth(const u8 *ies, size_t ies_len,
  * better. */
 static int wpa_scan_result_compar(const void *a, const void *b)
 {
-#define MIN(a,b) a < b ? a : b
 	struct wpa_scan_res **_wa = (void *) a;
 	struct wpa_scan_res **_wb = (void *) b;
 	struct wpa_scan_res *wa = *_wa;
@@ -2379,6 +2378,7 @@ static int wpa_scan_result_compar(const void *a, const void *b)
 	int wpa_a, wpa_b;
 	int snr_a, snr_b, snr_a_full, snr_b_full;
 	size_t ies_len;
+	const u8 *rsne_a, *rsne_b;
 
 	/* WPA/WPA2 support preferred */
 	wpa_a = wpa_scan_get_vendor_ie(wa, WPA_IE_VENDOR_TYPE) != NULL ||
@@ -2422,6 +2422,32 @@ static int wpa_scan_result_compar(const void *a, const void *b)
 		snr_b = snr_b_full = wb->level;
 	}
 
+	/* If SNR of a SAE BSS is good or at least as high as the PSK BSS,
+	 * prefer SAE over PSK for mixed WPA3-Personal transition mode and
+	 * WPA2-Personal deployments */
+	rsne_a = wpa_scan_get_ie(wa, WLAN_EID_RSN);
+	rsne_b = wpa_scan_get_ie(wb, WLAN_EID_RSN);
+	if (rsne_a && rsne_b) {
+		struct wpa_ie_data data;
+		bool psk_a = false, psk_b = false, sae_a = false, sae_b = false;
+
+		if (wpa_parse_wpa_ie_rsn(rsne_a, 2 + rsne_a[1], &data) == 0) {
+			psk_a = wpa_key_mgmt_wpa_psk_no_sae(data.key_mgmt);
+			sae_a = wpa_key_mgmt_sae(data.key_mgmt);
+		}
+		if (wpa_parse_wpa_ie_rsn(rsne_b, 2 + rsne_b[1], &data) == 0) {
+			psk_b = wpa_key_mgmt_wpa_psk_no_sae(data.key_mgmt);
+			sae_b = wpa_key_mgmt_sae(data.key_mgmt);
+		}
+
+		if (sae_a && !sae_b && psk_b &&
+		    (snr_a >= GREAT_SNR || snr_a >= snr_b))
+			return -1;
+		if (sae_b && !sae_a && psk_a &&
+		    (snr_b >= GREAT_SNR || snr_b >= snr_a))
+			return 1;
+	}
+
 	/* If SNR is close, decide by max rate or frequency band. For cases
 	 * involving the 6 GHz band, use the throughput estimate irrespective
 	 * of the SNR difference since the LPI/VLP rules may result in
@@ -2448,7 +2474,6 @@ static int wpa_scan_result_compar(const void *a, const void *b)
 	if (snr_b_full == snr_a_full)
 		return wb->qual - wa->qual;
 	return snr_b_full - snr_a_full;
-#undef MIN
 }
 
 
@@ -2877,6 +2902,7 @@ unsigned int wpas_get_est_tpt(const struct wpa_supplicant *wpa_s,
 	 * been taken into account.
 	 */
 	int adjusted_snr;
+	bool ht40 = false, vht80 = false, vht160 = false;
 
 	/* Limit based on estimated SNR */
 	if (rate > 1 * 2 && snr < 1)
@@ -2932,11 +2958,14 @@ unsigned int wpas_get_est_tpt(const struct wpa_supplicant *wpa_s,
 		}
 	}
 
+	ie = get_ie(ies, ies_len, WLAN_EID_HT_OPERATION);
+	if (ie && ie[1] >= 2 &&
+	    (ie[3] & HT_INFO_HT_PARAM_SECONDARY_CHNL_OFF_MASK))
+		ht40 = true;
+
 	if (hw_mode &&
 	    (hw_mode->ht_capab & HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET)) {
-		ie = get_ie(ies, ies_len, WLAN_EID_HT_OPERATION);
-		if (ie && ie[1] >= 2 &&
-		    (ie[3] & HT_INFO_HT_PARAM_SECONDARY_CHNL_OFF_MASK)) {
+		if (ht40) {
 			*max_cw = CHAN_WIDTH_40;
 			adjusted_snr = snr +
 				wpas_channel_width_rssi_bump(ies, ies_len,
@@ -2947,22 +2976,36 @@ unsigned int wpas_get_est_tpt(const struct wpa_supplicant *wpa_s,
 		}
 	}
 
+	/* Determine VHT BSS bandwidth based on IEEE Std 802.11-2020,
+	 * Table 11-23 (VHT BSS bandwidth) */
+	ie = get_ie(ies, ies_len, WLAN_EID_VHT_OPERATION);
+	if (ie && ie[1] >= 3) {
+		u8 cw = ie[2] & VHT_OPMODE_CHANNEL_WIDTH_MASK;
+		u8 seg0 = ie[3];
+		u8 seg1 = ie[4];
+
+		if (cw)
+			vht80 = true;
+		if (cw == 2 ||
+		    (cw == 3 && (seg1 > 0 && abs(seg1 - seg0) == 16)))
+			vht160 = true;
+		if (cw == 1 &&
+		    ((seg1 > 0 && abs(seg1 - seg0) == 8) ||
+		     (seg1 > 0 && abs(seg1 - seg0) == 16)))
+			vht160 = true;
+	}
+
 	if (hw_mode && hw_mode->vht_capab) {
 		/* Use +1 to assume VHT is always faster than HT */
 		ie = get_ie(ies, ies_len, WLAN_EID_VHT_CAP);
 		if (ie) {
-			bool vht80 = false, vht160 = false;
-
 			if (*max_cw == CHAN_WIDTH_UNKNOWN)
 				*max_cw = CHAN_WIDTH_20;
 			tmp = max_ht20_rate(snr, true) + 1;
 			if (tmp > est)
 				est = tmp;
 
-			ie = get_ie(ies, ies_len, WLAN_EID_HT_OPERATION);
-			if (ie && ie[1] >= 2 &&
-			    (ie[3] &
-			     HT_INFO_HT_PARAM_SECONDARY_CHNL_OFF_MASK)) {
+			if (ht40) {
 				*max_cw = CHAN_WIDTH_40;
 				adjusted_snr = snr +
 					wpas_channel_width_rssi_bump(
@@ -2970,26 +3013,6 @@ unsigned int wpas_get_est_tpt(const struct wpa_supplicant *wpa_s,
 				tmp = max_ht40_rate(adjusted_snr, true) + 1;
 				if (tmp > est)
 					est = tmp;
-			}
-
-			/* Determine VHT BSS bandwidth based on IEEE Std
-			 * 802.11-2020, Table 11-23 (VHT BSs bandwidth) */
-			ie = get_ie(ies, ies_len, WLAN_EID_VHT_OPERATION);
-			if (ie && ie[1] >= 3) {
-				u8 cw = ie[2] & VHT_OPMODE_CHANNEL_WIDTH_MASK;
-				u8 seg0 = ie[3];
-				u8 seg1 = ie[4];
-
-				if (cw)
-					vht80 = true;
-				if (cw == 2 ||
-				    (cw == 3 &&
-				     (seg1 > 0 && abs(seg1 - seg0) == 16)))
-					vht160 = true;
-				if (cw == 1 &&
-				    ((seg1 > 0 && abs(seg1 - seg0) == 8) ||
-				     (seg1 > 0 && abs(seg1 - seg0) == 16)))
-					vht160 = true;
 			}
 
 			if (vht80) {
@@ -3051,9 +3074,10 @@ unsigned int wpas_get_est_tpt(const struct wpa_supplicant *wpa_s,
 
 		cw = he->he_phy_capab_info[HE_PHYCAP_CHANNEL_WIDTH_SET_IDX] &
 			own_he->phy_cap[HE_PHYCAP_CHANNEL_WIDTH_SET_IDX];
-		if (cw &
-		    (IS_2P4GHZ(freq) ? HE_PHYCAP_CHANNEL_WIDTH_SET_40MHZ_IN_2G :
-		     HE_PHYCAP_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G)) {
+		if ((cw &
+		     (IS_2P4GHZ(freq) ?
+		      HE_PHYCAP_CHANNEL_WIDTH_SET_40MHZ_IN_2G :
+		      HE_PHYCAP_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G)) && ht40) {
 			if (*max_cw == CHAN_WIDTH_UNKNOWN ||
 			    *max_cw < CHAN_WIDTH_40)
 				*max_cw = CHAN_WIDTH_40;
@@ -3066,7 +3090,8 @@ unsigned int wpas_get_est_tpt(const struct wpa_supplicant *wpa_s,
 		}
 
 		if (!IS_2P4GHZ(freq) &&
-		    (cw & HE_PHYCAP_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G)) {
+		    (cw & HE_PHYCAP_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G) &&
+		    (!IS_5GHZ(freq) || vht80)) {
 			if (*max_cw == CHAN_WIDTH_UNKNOWN ||
 			    *max_cw < CHAN_WIDTH_80)
 				*max_cw = CHAN_WIDTH_80;
@@ -3080,7 +3105,8 @@ unsigned int wpas_get_est_tpt(const struct wpa_supplicant *wpa_s,
 
 		if (!IS_2P4GHZ(freq) &&
 		    (cw & (HE_PHYCAP_CHANNEL_WIDTH_SET_160MHZ_IN_5G |
-			   HE_PHYCAP_CHANNEL_WIDTH_SET_80PLUS80MHZ_IN_5G))) {
+			   HE_PHYCAP_CHANNEL_WIDTH_SET_80PLUS80MHZ_IN_5G)) &&
+		    (!IS_5GHZ(freq) || vht160)) {
 			if (*max_cw == CHAN_WIDTH_UNKNOWN ||
 			    *max_cw < CHAN_WIDTH_160)
 				*max_cw = CHAN_WIDTH_160;

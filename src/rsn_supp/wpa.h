@@ -133,6 +133,9 @@ enum wpa_sm_conf_params {
 	WPA_PARAM_OCI_FREQ_FILS_ASSOC,
 	WPA_PARAM_ADAPT_FT_KEY_MGMT,
 	WPA_PARAM_DISABLE_EAPOL_G2_TX,
+	WPA_PARAM_ENCRYPT_EAPOL_M2,
+	WPA_PARAM_ENCRYPT_EAPOL_M4,
+	WPA_PARAM_FT_PREPEND_PMKID,
 };
 
 struct rsn_supp_config {
@@ -608,6 +611,8 @@ extern unsigned int tdls_testing;
 
 int wpa_wnmsleep_install_key(struct wpa_sm *sm, u8 subelem_id, u8 *buf);
 void wpa_sm_set_test_assoc_ie(struct wpa_sm *sm, struct wpabuf *buf);
+void wpa_sm_set_test_eapol_m2_elems(struct wpa_sm *sm, struct wpabuf *buf);
+void wpa_sm_set_test_eapol_m4_elems(struct wpa_sm *sm, struct wpabuf *buf);
 const u8 * wpa_sm_get_anonce(struct wpa_sm *sm);
 unsigned int wpa_sm_get_key_mgmt(struct wpa_sm *sm);
 

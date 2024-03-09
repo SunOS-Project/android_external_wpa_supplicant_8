@@ -313,6 +313,8 @@ static void p2p_listen_in_find(struct p2p_data *p2p, int dev_disc)
 		    ies) < 0) {
 		p2p_dbg(p2p, "Failed to start listen mode");
 		p2p->pending_listen_freq = 0;
+	} else {
+		p2p->pending_listen_wait_drv = true;
 	}
 	wpabuf_free(ies);
 }
@@ -362,6 +364,7 @@ int p2p_listen(struct p2p_data *p2p, unsigned int timeout)
 		wpabuf_free(ies);
 		return -1;
 	}
+	p2p->pending_listen_wait_drv = true;
 	wpabuf_free(ies);
 
 	p2p_set_state(p2p, P2P_LISTEN_ONLY);
@@ -1052,6 +1055,7 @@ static void p2p_search(struct p2p_data *p2p)
 		return;
 	}
 	p2p->cfg->stop_listen(p2p->cfg->cb_ctx);
+	p2p->pending_listen_wait_drv = false;
 
 	if (p2p->find_pending_full &&
 	    (p2p->find_type == P2P_FIND_PROGRESSIVE ||
@@ -1269,6 +1273,7 @@ int p2p_find(struct p2p_data *p2p, unsigned int timeout,
 		p2p->pending_listen_freq = 0;
 	}
 	p2p->cfg->stop_listen(p2p->cfg->cb_ctx);
+	p2p->pending_listen_wait_drv = false;
 	p2p->find_pending_full = 0;
 	p2p->find_type = type;
 	if (freq != 2412 && freq != 2437 && freq != 2462 && freq != 60480)
@@ -1363,6 +1368,10 @@ void p2p_stop_find_for_freq(struct p2p_data *p2p, int freq)
 
 void p2p_stop_listen_for_freq(struct p2p_data *p2p, int freq)
 {
+	p2p_dbg(p2p,
+		"%s(freq=%d) pending_listen_freq=%d in_listen=%d drv_in_listen=%d",
+		__func__, freq, p2p->pending_listen_freq, p2p->in_listen,
+		p2p->drv_in_listen);
 	if (freq > 0 &&
 	    ((p2p->drv_in_listen == freq && p2p->in_listen) ||
 	     p2p->pending_listen_freq == (unsigned int) freq)) {
@@ -1382,7 +1391,15 @@ void p2p_stop_listen_for_freq(struct p2p_data *p2p, int freq)
 		p2p_dbg(p2p, "Clear drv_in_listen (%d)", p2p->drv_in_listen);
 		p2p->drv_in_listen = 0;
 	}
+	if (p2p->pending_listen_freq &&
+	    p2p->pending_listen_freq != (unsigned int) freq &&
+	    !p2p->drv_in_listen && p2p->pending_listen_wait_drv) {
+		p2p_dbg(p2p,
+			"Clear pending_listen_freq since the started listen did not complete before being stopped");
+		p2p->pending_listen_freq = 0;
+	}
 	p2p->cfg->stop_listen(p2p->cfg->cb_ctx);
+	p2p->pending_listen_wait_drv = false;
 }
 
 
@@ -2127,6 +2144,7 @@ static void p2p_go_neg_start(void *eloop_ctx, void *timeout_ctx)
 		p2p->pending_listen_freq = 0;
 	}
 	p2p->cfg->stop_listen(p2p->cfg->cb_ctx);
+	p2p->pending_listen_wait_drv = false;
 	p2p->go_neg_peer->status = P2P_SC_SUCCESS;
 	/*
 	 * Set new timeout to make sure a previously set one does not expire
@@ -2147,6 +2165,7 @@ static void p2p_invite_start(void *eloop_ctx, void *timeout_ctx)
 		p2p->pending_listen_freq = 0;
 	}
 	p2p->cfg->stop_listen(p2p->cfg->cb_ctx);
+	p2p->pending_listen_wait_drv = false;
 	p2p_invite_send(p2p, p2p->invite_peer, p2p->invite_go_dev_addr,
 			p2p->invite_dev_pw_id);
 }
@@ -4036,6 +4055,7 @@ void p2p_listen_cb(struct p2p_data *p2p, unsigned int freq,
 	p2p_dbg(p2p, "Starting Listen timeout(%u,%u) on freq=%u based on callback",
 		p2p->pending_listen_sec, p2p->pending_listen_usec,
 		p2p->pending_listen_freq);
+	p2p->pending_listen_wait_drv = false;
 	p2p->in_listen = 1;
 	p2p->drv_in_listen = freq;
 	if (p2p->pending_listen_sec || p2p->pending_listen_usec) {
@@ -4191,6 +4211,7 @@ static void p2p_timeout_wait_peer_idle(struct p2p_data *p2p)
 
 	p2p_dbg(p2p, "Go to Listen state while waiting for the peer to become ready for GO Negotiation");
 	p2p->cfg->stop_listen(p2p->cfg->cb_ctx);
+	p2p->pending_listen_wait_drv = false;
 	if (p2p->pending_listen_freq) {
 		p2p_dbg(p2p, "Clear pending_listen_freq for %s", __func__);
 		p2p->pending_listen_freq = 0;
@@ -4318,6 +4339,7 @@ static void p2p_state_timeout(void *eloop_ctx, void *timeout_ctx)
 	if (p2p->drv_in_listen) {
 		p2p_dbg(p2p, "Driver is still in listen state - stop it");
 		p2p->cfg->stop_listen(p2p->cfg->cb_ctx);
+		p2p->pending_listen_wait_drv = false;
 	}
 
 	switch (p2p->state) {
@@ -4811,15 +4833,6 @@ static void p2p_ext_listen_timeout(void *eloop_ctx, void *timeout_ctx)
 				       p2p_ext_listen_timeout, p2p, NULL);
 	}
 
-	if ((p2p->cfg->is_p2p_in_progress &&
-	     p2p->cfg->is_p2p_in_progress(p2p->cfg->cb_ctx)) ||
-	    (p2p->pending_action_state == P2P_PENDING_PD &&
-	     p2p->pd_retries > 0)) {
-		p2p_dbg(p2p, "Operation in progress - skip Extended Listen timeout (%s)",
-			p2p_state_txt(p2p->state));
-		return;
-	}
-
 	if (p2p->state == P2P_LISTEN_ONLY && p2p->ext_listen_only) {
 		/*
 		 * This should not really happen, but it looks like the Listen
@@ -4830,6 +4843,15 @@ static void p2p_ext_listen_timeout(void *eloop_ctx, void *timeout_ctx)
 		p2p_dbg(p2p, "Previous Extended Listen operation had not been completed - try again");
 		p2p->ext_listen_only = 0;
 		p2p_set_state(p2p, P2P_IDLE);
+	}
+
+	if ((p2p->cfg->is_p2p_in_progress &&
+	     p2p->cfg->is_p2p_in_progress(p2p->cfg->cb_ctx)) ||
+	    (p2p->pending_action_state == P2P_PENDING_PD &&
+	     p2p->pd_retries > 0)) {
+		p2p_dbg(p2p, "Operation in progress - skip Extended Listen timeout (%s)",
+			p2p_state_txt(p2p->state));
+		return;
 	}
 
 	if (p2p->state != P2P_IDLE) {

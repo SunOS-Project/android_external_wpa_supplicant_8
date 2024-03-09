@@ -265,9 +265,35 @@ int hostapd_set_ap_wps_ie(struct hostapd_data *hapd)
 }
 
 
+static bool hostapd_sta_is_link_sta(struct hostapd_data *hapd,
+				    struct sta_info *sta)
+{
+#ifdef CONFIG_IEEE80211BE
+	if (ap_sta_is_mld(hapd, sta) &&
+	    sta->mld_assoc_link_id != hapd->mld_link_id)
+		return true;
+#endif /* CONFIG_IEEE80211BE */
+
+	return false;
+}
+
+
 int hostapd_set_authorized(struct hostapd_data *hapd,
 			   struct sta_info *sta, int authorized)
 {
+	/*
+	 * The WPA_STA_AUTHORIZED flag is relevant only for the MLD station and
+	 * not to the link stations (as the authorization is done between the
+	 * MLD peers). Thus, do not propagate the change to the driver for the
+	 * link stations.
+	 */
+	if (hostapd_sta_is_link_sta(hapd, sta)) {
+		wpa_printf(MSG_DEBUG,
+			   "%s: Do not update link station flags (" MACSTR ")",
+			   __func__, MAC2STR(sta->addr));
+		return 0;
+	}
+
 	if (authorized) {
 		return hostapd_sta_set_flags(hapd, sta->addr,
 					     hostapd_sta_flags_to_drv(
@@ -285,11 +311,24 @@ int hostapd_set_sta_flags(struct hostapd_data *hapd, struct sta_info *sta)
 {
 	int set_flags, total_flags, flags_and, flags_or;
 	total_flags = hostapd_sta_flags_to_drv(sta->flags);
-	set_flags = WPA_STA_SHORT_PREAMBLE | WPA_STA_WMM | WPA_STA_MFP;
-	if (((!hapd->conf->ieee802_1x && !hapd->conf->wpa) ||
-	     sta->auth_alg == WLAN_AUTH_FT) &&
-	    sta->flags & WLAN_STA_AUTHORIZED)
-		set_flags |= WPA_STA_AUTHORIZED;
+	set_flags = WPA_STA_SHORT_PREAMBLE | WPA_STA_WMM | WPA_STA_MFP |
+		WPA_STA_AUTHORIZED;
+
+	/*
+	 * All the station flags other than WPA_STA_SHORT_PREAMBLE are relevant
+	 * only for the MLD station and not to the link stations (as these flags
+	 * are related to the MLD state and not the link state). As for the
+	 * WPA_STA_SHORT_PREAMBLE, since the station is an EHT station, it must
+	 * support short preamble. Thus, do not propagate the change to the
+	 * driver for the link stations.
+	 */
+	if (hostapd_sta_is_link_sta(hapd, sta)) {
+		wpa_printf(MSG_DEBUG,
+			   "%s: Do not update link station flags (" MACSTR ")",
+			   __func__, MAC2STR(sta->addr));
+		return 0;
+	}
+
 	flags_or = total_flags & set_flags;
 	flags_and = total_flags | ~set_flags;
 	return hostapd_sta_set_flags(hapd, sta->addr, total_flags,
@@ -795,15 +834,21 @@ int hostapd_drv_sta_deauth(struct hostapd_data *hapd,
 			   const u8 *addr, int reason)
 {
 	int link_id = -1;
+	const u8 *own_addr = hapd->own_addr;
 
 #ifdef CONFIG_IEEE80211BE
-	if (hapd->conf->mld_ap)
+	if (hapd->conf->mld_ap) {
+		struct sta_info *sta = ap_get_sta(hapd, addr);
+
 		link_id = hapd->mld_link_id;
+		if (ap_sta_is_mld(hapd, sta))
+			own_addr = hapd->mld_addr;
+	}
 #endif /* CONFIG_IEEE80211BE */
 
 	if (!hapd->driver || !hapd->driver->sta_deauth || !hapd->drv_priv)
 		return 0;
-	return hapd->driver->sta_deauth(hapd->drv_priv, hapd->own_addr, addr,
+	return hapd->driver->sta_deauth(hapd->drv_priv, own_addr, addr,
 					reason, link_id);
 }
 
@@ -811,9 +856,20 @@ int hostapd_drv_sta_deauth(struct hostapd_data *hapd,
 int hostapd_drv_sta_disassoc(struct hostapd_data *hapd,
 			     const u8 *addr, int reason)
 {
+	const u8 *own_addr = hapd->own_addr;
+
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap) {
+		struct sta_info *sta = ap_get_sta(hapd, addr);
+
+		if (ap_sta_is_mld(hapd, sta))
+			own_addr = hapd->mld_addr;
+	}
+#endif /* CONFIG_IEEE80211BE */
+
 	if (!hapd->driver || !hapd->driver->sta_disassoc || !hapd->drv_priv)
 		return 0;
-	return hapd->driver->sta_disassoc(hapd->drv_priv, hapd->own_addr, addr,
+	return hapd->driver->sta_disassoc(hapd->drv_priv, own_addr, addr,
 					  reason);
 }
 
@@ -867,7 +923,7 @@ static int hapd_drv_send_action(struct hostapd_data *hapd, unsigned int freq,
 	} else if (hapd->conf->mld_ap) {
 		sta = ap_get_sta(hapd, dst);
 
-		if (sta && sta->mld_info.mld_sta) {
+		if (ap_sta_is_mld(hapd, sta)) {
 			own_addr = hapd->mld_addr;
 			bssid = own_addr;
 		}
@@ -1057,6 +1113,12 @@ int hostapd_drv_do_acs(struct hostapd_data *hapd)
 
 	os_memset(&params, 0, sizeof(params));
 	params.hw_mode = hapd->iface->conf->hw_mode;
+	params.link_id = -1;
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap && hapd->iconf->ieee80211be &&
+	    !hapd->conf->disable_11be)
+		params.link_id = hapd->mld_link_id;
+#endif /* CONFIG_IEEE80211BE */
 
 	/*
 	 * If no chanlist config parameter is provided, include all enabled

@@ -44,12 +44,13 @@ static u16 ieee80211_eht_ppet_size(u16 ppe_thres_hdr, const u8 *phy_cap_info)
 
 
 static u8 ieee80211_eht_mcs_set_size(enum hostapd_hw_mode mode, u8 opclass,
-				     u8 he_oper_chwidth, const u8 *he_phy_cap,
+				     int he_oper_chwidth, const u8 *he_phy_cap,
 				     const u8 *eht_phy_cap)
 {
 	u8 sz = EHT_PHYCAP_MCS_NSS_LEN_20MHZ_PLUS;
 	bool band24, band5, band6;
 	u8 he_phy_cap_chwidth = ~HE_PHYCAP_CHANNEL_WIDTH_MASK;
+	u8 cap_chwidth;
 
 	switch (he_oper_chwidth) {
 	case CONF_OPER_CHWIDTH_80P80MHZ:
@@ -66,7 +67,11 @@ static u8 ieee80211_eht_mcs_set_size(enum hostapd_hw_mode mode, u8 opclass,
 		break;
 	}
 
-	he_phy_cap_chwidth &= he_phy_cap[HE_PHYCAP_CHANNEL_WIDTH_SET_IDX];
+	cap_chwidth = he_phy_cap[HE_PHYCAP_CHANNEL_WIDTH_SET_IDX];
+	if (he_oper_chwidth != -1)
+		he_phy_cap_chwidth &= cap_chwidth;
+	else
+		he_phy_cap_chwidth = cap_chwidth;
 
 	band24 = mode == HOSTAPD_MODE_IEEE80211B ||
 		mode == HOSTAPD_MODE_IEEE80211G ||
@@ -199,12 +204,33 @@ u8 * hostapd_eid_eht_operation(struct hostapd_data *hapd, u8 *eid)
 	struct ieee80211_eht_operation *oper;
 	u8 *pos = eid, seg0 = 0, seg1 = 0;
 	enum oper_chan_width chwidth;
-	size_t elen = 1 + 4 + 3;
+	size_t elen = 1 + 4;
+	bool eht_oper_info_present;
+	u16 punct_bitmap = conf->punct_bitmap;
 
 	if (!hapd->iface->current_mode)
 		return eid;
 
-	if (hapd->iconf->punct_bitmap)
+#ifdef CONFIG_TESTING_OPTIONS
+	if (!punct_bitmap && hapd->conf->eht_oper_puncturing_override) {
+		wpa_printf(MSG_DEBUG, "EHT: Puncturing mask override=0x%x",
+			   hapd->conf->eht_oper_puncturing_override);
+		punct_bitmap = hapd->conf->eht_oper_puncturing_override;
+	}
+#endif /* CONFIG_TESTING_OPTIONS */
+
+	if (is_6ghz_op_class(conf->op_class))
+		chwidth = op_class_to_ch_width(conf->op_class);
+	else
+		chwidth = conf->eht_oper_chwidth;
+
+	eht_oper_info_present = chwidth == CONF_OPER_CHWIDTH_320MHZ ||
+		punct_bitmap;
+
+	if (eht_oper_info_present)
+		elen += 3;
+
+	if (punct_bitmap)
 		elen += EHT_OPER_DISABLED_SUBCHAN_BITMAP_SIZE;
 
 	*pos++ = WLAN_EID_EXTENSION;
@@ -212,7 +238,10 @@ u8 * hostapd_eid_eht_operation(struct hostapd_data *hapd, u8 *eid)
 	*pos++ = WLAN_EID_EXT_EHT_OPERATION;
 
 	oper = (struct ieee80211_eht_operation *) pos;
-	oper->oper_params = EHT_OPER_INFO_PRESENT;
+	oper->oper_params = 0;
+
+	if (hapd->iconf->eht_default_pe_duration)
+		oper->oper_params |= EHT_OPER_DEFAULT_PE_DURATION;
 
 	/* TODO: Fill in appropriate EHT-MCS max Nss information */
 	oper->basic_eht_mcs_nss_set[0] = 0x11;
@@ -220,11 +249,10 @@ u8 * hostapd_eid_eht_operation(struct hostapd_data *hapd, u8 *eid)
 	oper->basic_eht_mcs_nss_set[2] = 0x00;
 	oper->basic_eht_mcs_nss_set[3] = 0x00;
 
-	if (is_6ghz_op_class(conf->op_class))
-		chwidth = op_class_to_ch_width(conf->op_class);
-	else
-		chwidth = conf->eht_oper_chwidth;
+	if (!eht_oper_info_present)
+		return pos + elen;
 
+	oper->oper_params |= EHT_OPER_INFO_PRESENT;
 	seg0 = hostapd_get_oper_centr_freq_seg0_idx(conf);
 
 	switch (chwidth) {
@@ -258,10 +286,10 @@ u8 * hostapd_eid_eht_operation(struct hostapd_data *hapd, u8 *eid)
 	oper->oper_info.ccfs0 = seg0 ? seg0 : hapd->iconf->channel;
 	oper->oper_info.ccfs1 = seg1;
 
-	if (hapd->iconf->punct_bitmap) {
+	if (punct_bitmap) {
 		oper->oper_params |= EHT_OPER_DISABLED_SUBCHAN_BITMAP_PRESENT;
 		oper->oper_info.disabled_chan_bitmap =
-			host_to_le16(hapd->iconf->punct_bitmap);
+			host_to_le16(punct_bitmap);
 	}
 
 	return pos + elen;
@@ -338,9 +366,8 @@ static bool check_valid_eht_mcs(struct hostapd_data *hapd,
 
 
 static bool ieee80211_invalid_eht_cap_size(enum hostapd_hw_mode mode,
-					   u8 opclass, u8 he_oper_chwidth,
-					   const u8 *he_cap, const u8 *eht_cap,
-					   size_t len)
+					   u8 opclass, const u8 *he_cap,
+					   const u8 *eht_cap, size_t len)
 {
 	const struct ieee80211_he_capabilities *he_capab;
 	struct ieee80211_eht_capabilities *cap;
@@ -355,8 +382,8 @@ static bool ieee80211_invalid_eht_cap_size(enum hostapd_hw_mode mode,
 	if (len < cap_len)
 		return true;
 
-	cap_len += ieee80211_eht_mcs_set_size(mode, opclass, he_oper_chwidth,
-					      he_phy_cap, cap->phy_cap);
+	cap_len += ieee80211_eht_mcs_set_size(mode, opclass, -1, he_phy_cap,
+					      cap->phy_cap);
 	if (len < cap_len)
 		return true;
 
@@ -380,7 +407,6 @@ u16 copy_sta_eht_capab(struct hostapd_data *hapd, struct sta_info *sta,
 	    !he_capab || he_capab_len < IEEE80211_HE_CAPAB_MIN_LEN ||
 	    !eht_capab ||
 	    ieee80211_invalid_eht_cap_size(mode, hapd->iconf->op_class,
-					   hapd->iconf->he_oper_chwidth,
 					   he_capab, eht_capab,
 					   eht_capab_len) ||
 	    !check_valid_eht_mcs(hapd, eht_capab, opmode)) {
@@ -421,8 +447,9 @@ void hostapd_get_eht_capab(struct hostapd_data *hapd,
 }
 
 
-u8 * hostapd_eid_eht_basic_ml(struct hostapd_data *hapd, u8 *eid,
-			      struct sta_info *info, bool include_mld_id)
+static u8 * hostapd_eid_eht_basic_ml_common(struct hostapd_data *hapd,
+					    u8 *eid, struct mld_info *mld_info,
+					    bool include_mld_id)
 {
 	struct wpabuf *buf;
 	u16 control;
@@ -454,7 +481,8 @@ u8 * hostapd_eid_eht_basic_ml(struct hostapd_data *hapd, u8 *eid,
 	 * BSS Parameters Change Count (1) + EML Capabilities (2) +
 	 * MLD Capabilities and Operations (2)
 	 */
-	common_info_len = 13;
+#define EHT_ML_COMMON_INFO_LEN 13
+	common_info_len = EHT_ML_COMMON_INFO_LEN;
 
 	if (include_mld_id) {
 		/* AP MLD ID */
@@ -489,12 +517,12 @@ u8 * hostapd_eid_eht_basic_ml(struct hostapd_data *hapd, u8 *eid,
 		wpabuf_put_u8(buf, hapd->conf->mld_id);
 	}
 
-	if (!info)
+	if (!mld_info)
 		goto out;
 
 	/* Add link info for the other links */
 	for (link_id = 0; link_id < MAX_NUM_MLD_LINKS; link_id++) {
-		struct mld_link_info *link = &info->mld_info.links[link_id];
+		struct mld_link_info *link = &mld_info->links[link_id];
 		struct hostapd_data *link_bss;
 
 		/*
@@ -502,8 +530,9 @@ u8 * hostapd_eid_eht_basic_ml(struct hostapd_data *hapd, u8 *eid,
 		 * beacon interval (2) + TSF offset (8) + DTIM info (2) + BSS
 		 * parameters change counter (1) + station profile length.
 		 */
-		const size_t fixed_len = 22;
-		size_t total_len = fixed_len + link->resp_sta_profile_len;
+#define EHT_ML_STA_INFO_LEN 22
+		size_t total_len = EHT_ML_STA_INFO_LEN +
+			link->resp_sta_profile_len;
 
 		/* Skip the local one */
 		if (link_id == hapd->mld_link_id || !link->valid)
@@ -537,7 +566,7 @@ u8 * hostapd_eid_eht_basic_ml(struct hostapd_data *hapd, u8 *eid,
 		/* STA Info */
 
 		/* STA Info Length */
-		wpabuf_put_u8(buf, fixed_len - 2);
+		wpabuf_put_u8(buf, EHT_ML_STA_INFO_LEN - 2);
 		wpabuf_put_data(buf, link->local_addr, ETH_ALEN);
 		wpabuf_put_le16(buf, link_bss->iconf->beacon_int);
 
@@ -552,9 +581,10 @@ u8 * hostapd_eid_eht_basic_ml(struct hostapd_data *hapd, u8 *eid,
 		wpabuf_put_le16(buf, link_bss->conf->dtim_period);
 
 		/* BSS Parameters Change Count */
-		/* TODO: Currently hard code the BSS Parameters Change Count to
-		 * 0x1 */
-		wpabuf_put_u8(buf, 0x1);
+		wpabuf_put_u8(buf, hapd->eht_mld_bss_param_change);
+
+		if (!link->resp_sta_profile)
+			continue;
 
 		/* Fragment the sub element if needed */
 		if (total_len <= 255) {
@@ -564,7 +594,7 @@ u8 * hostapd_eid_eht_basic_ml(struct hostapd_data *hapd, u8 *eid,
 			ptr = link->resp_sta_profile;
 			len = link->resp_sta_profile_len;
 
-			slice_len = 255 - fixed_len;
+			slice_len = 255 - EHT_ML_STA_INFO_LEN;
 
 			wpabuf_put_data(buf, ptr, slice_len);
 			len -= slice_len;
@@ -622,6 +652,151 @@ out:
 
 	wpabuf_free(buf);
 	return pos;
+}
+
+
+static u8 * hostapd_eid_eht_reconf_ml(struct hostapd_data *hapd, u8 *eid)
+{
+#ifdef CONFIG_TESTING_OPTIONS
+	struct hostapd_data *other_hapd;
+	u16 control;
+	u8 *pos = eid;
+	unsigned int i;
+
+	wpa_printf(MSG_DEBUG, "MLD: Reconfiguration ML");
+
+	/* First check if the element needs to be added */
+	for (i = 0; i < hapd->iface->interfaces->count; i++) {
+		other_hapd = hapd->iface->interfaces->iface[i]->bss[0];
+
+		wpa_printf(MSG_DEBUG, "MLD: Reconfiguration ML: %u",
+			   other_hapd->eht_mld_link_removal_count);
+
+		if (other_hapd->eht_mld_link_removal_count)
+			break;
+	}
+
+	/* No link is going to be removed */
+	if (i == hapd->iface->interfaces->count)
+		return eid;
+
+	wpa_printf(MSG_DEBUG, "MLD: Reconfiguration ML: Adding element");
+
+	/* The length will be set at the end */
+	*pos++ = WLAN_EID_EXTENSION;
+	*pos++ = 0;
+	*pos++ = WLAN_EID_EXT_MULTI_LINK;
+
+	/* Set the Multi-Link Control field */
+	control = MULTI_LINK_CONTROL_TYPE_RECONF;
+	WPA_PUT_LE16(pos, control);
+	pos += 2;
+
+	/* Common Info doesn't include any information */
+	*pos++ = 1;
+
+	/* Add the per station profiles */
+	for (i = 0; i < hapd->iface->interfaces->count; i++) {
+		other_hapd = hapd->iface->interfaces->iface[i]->bss[0];
+		if (!other_hapd->eht_mld_link_removal_count)
+			continue;
+
+		/* Subelement ID is 0 */
+		*pos++ = 0;
+		*pos++ = 5;
+
+		control = other_hapd->mld_link_id |
+			EHT_PER_STA_RECONF_CTRL_AP_REMOVAL_TIMER;
+
+		WPA_PUT_LE16(pos, control);
+		pos += 2;
+
+		/* STA profile length */
+		*pos++ = 3;
+
+		WPA_PUT_LE16(pos, other_hapd->eht_mld_link_removal_count);
+		pos += 2;
+	}
+
+	eid[1] = pos - eid - 2;
+
+	wpa_hexdump(MSG_DEBUG, "MLD: Reconfiguration ML", eid, eid[1] + 2);
+	return pos;
+#else /* CONFIG_TESTING_OPTIONS */
+	return eid;
+#endif /* CONFIG_TESTING_OPTIONS */
+}
+
+
+static size_t hostapd_eid_eht_ml_len(struct mld_info *info,
+				     bool include_mld_id)
+{
+	size_t len = 0;
+	size_t eht_ml_len = 2 + EHT_ML_COMMON_INFO_LEN;
+	u8 link_id;
+
+	if (include_mld_id)
+		eht_ml_len++;
+
+	for (link_id = 0; info && link_id < ARRAY_SIZE(info->links);
+	     link_id++) {
+		struct mld_link_info *link;
+		size_t sta_len = EHT_ML_STA_INFO_LEN;
+
+		link = &info->links[link_id];
+		if (!link->valid)
+			continue;
+
+		sta_len += link->resp_sta_profile_len;
+
+		/* Element data and (fragmentation) headers */
+		eht_ml_len += sta_len;
+		eht_ml_len += 2 + sta_len / 255 * 2;
+	}
+
+	/* Element data */
+	len += eht_ml_len;
+
+	/* First header (254 bytes of data) */
+	len += 3;
+
+	/* Fragmentation headers; +1 for shorter first chunk */
+	len += (eht_ml_len + 1) / 255 * 2;
+
+	return len;
+}
+#undef EHT_ML_COMMON_INFO_LEN
+#undef EHT_ML_STA_INFO_LEN
+
+
+u8 * hostapd_eid_eht_ml_beacon(struct hostapd_data *hapd,
+			       struct mld_info *info,
+			       u8 *eid, bool include_mld_id)
+{
+	eid = hostapd_eid_eht_basic_ml_common(hapd, eid, info, include_mld_id);
+	return hostapd_eid_eht_reconf_ml(hapd, eid);
+}
+
+
+
+u8 * hostapd_eid_eht_ml_assoc(struct hostapd_data *hapd, struct sta_info *info,
+			      u8 *eid)
+{
+	if (!ap_sta_is_mld(hapd, info))
+		return eid;
+
+	eid = hostapd_eid_eht_basic_ml_common(hapd, eid, &info->mld_info,
+					      false);
+	ap_sta_free_sta_profile(&info->mld_info);
+	return hostapd_eid_eht_reconf_ml(hapd, eid);
+}
+
+
+size_t hostapd_eid_eht_ml_beacon_len(struct hostapd_data *hapd,
+				     struct mld_info *info,
+				     bool include_mld_id)
+{
+	return hostapd_eid_eht_ml_len(info, include_mld_id);
 }
 
 
@@ -841,11 +1016,12 @@ const u8 * hostapd_process_ml_auth(struct hostapd_data *hapd,
 
 
 static int hostapd_mld_validate_assoc_info(struct hostapd_data *hapd,
-					   struct mld_info *info)
+					   struct sta_info *sta)
 {
 	u8 i, link_id;
+	struct mld_info *info = &sta->mld_info;
 
-	if (!info->mld_sta) {
+	if (!ap_sta_is_mld(hapd, sta)) {
 		wpa_printf(MSG_DEBUG, "MLD: Not a non-AP MLD");
 		return 0;
 	}
@@ -894,6 +1070,85 @@ static int hostapd_mld_validate_assoc_info(struct hostapd_data *hapd,
 }
 
 
+int hostapd_process_ml_assoc_req_addr(struct hostapd_data *hapd,
+				      const u8 *basic_mle, size_t basic_mle_len,
+				      u8 *mld_addr)
+{
+	struct wpabuf *mlbuf = ieee802_11_defrag(basic_mle, basic_mle_len,
+						 true);
+	struct ieee80211_eht_ml *ml;
+	struct eht_ml_basic_common_info *common_info;
+	size_t ml_len, common_info_len;
+	int ret = -1;
+	u16 ml_control;
+
+	if (!mlbuf)
+		return WLAN_STATUS_SUCCESS;
+
+	ml = (struct ieee80211_eht_ml *) wpabuf_head(mlbuf);
+	ml_len = wpabuf_len(mlbuf);
+
+	if (ml_len < sizeof(*ml))
+		goto out;
+
+	ml_control = le_to_host16(ml->ml_control);
+	if ((ml_control & MULTI_LINK_CONTROL_TYPE_MASK) !=
+	    MULTI_LINK_CONTROL_TYPE_BASIC) {
+		wpa_printf(MSG_DEBUG, "MLD: Invalid ML type=%u",
+			   ml_control & MULTI_LINK_CONTROL_TYPE_MASK);
+		goto out;
+	}
+
+	/* Common Info Length and MLD MAC Address must always be present */
+	common_info_len = 1 + ETH_ALEN;
+
+	if (ml_control & BASIC_MULTI_LINK_CTRL_PRES_LINK_ID) {
+		wpa_printf(MSG_DEBUG, "MLD: Link ID Info not expected");
+		goto out;
+	}
+
+	if (ml_control & BASIC_MULTI_LINK_CTRL_PRES_BSS_PARAM_CH_COUNT) {
+		wpa_printf(MSG_DEBUG,
+			   "MLD: BSS Parameters Change Count not expected");
+		goto out;
+	}
+
+	if (ml_control & BASIC_MULTI_LINK_CTRL_PRES_MSD_INFO) {
+		wpa_printf(MSG_DEBUG,
+			   "MLD: Medium Synchronization Delay Information not expected");
+		goto out;
+	}
+
+	if (ml_control & BASIC_MULTI_LINK_CTRL_PRES_EML_CAPA)
+		common_info_len += 2;
+
+	if (ml_control & BASIC_MULTI_LINK_CTRL_PRES_MLD_CAPA)
+		common_info_len += 2;
+
+	if (sizeof(*ml) + common_info_len > ml_len) {
+		wpa_printf(MSG_DEBUG, "MLD: Not enough bytes for common info");
+		goto out;
+	}
+
+	common_info = (struct eht_ml_basic_common_info *) ml->variable;
+
+	/* Common information length includes the length octet */
+	if (common_info->len != common_info_len) {
+		wpa_printf(MSG_DEBUG,
+			   "MLD: Invalid common info len=%u", common_info->len);
+		goto out;
+	}
+
+	/* Get the MLD MAC Address */
+	os_memcpy(mld_addr, common_info->mld_addr, ETH_ALEN);
+	ret = 0;
+
+out:
+	wpabuf_free(mlbuf);
+	return ret;
+}
+
+
 u16 hostapd_process_ml_assoc_req(struct hostapd_data *hapd,
 				 struct ieee802_11_elems *elems,
 				 struct sta_info *sta)
@@ -908,7 +1163,7 @@ u16 hostapd_process_ml_assoc_req(struct hostapd_data *hapd,
 	int ret = -1;
 	u16 ml_control;
 
-	mlbuf = ieee802_11_defrag_mle(elems, MULTI_LINK_CONTROL_TYPE_BASIC);
+	mlbuf = ieee802_11_defrag(elems->basic_mle, elems->basic_mle_len, true);
 	if (!mlbuf)
 		return WLAN_STATUS_SUCCESS;
 
@@ -1000,7 +1255,7 @@ u16 hostapd_process_ml_assoc_req(struct hostapd_data *hapd,
 		goto out;
 	}
 
-	info->links[hapd->mld_link_id].valid = true;
+	info->links[hapd->mld_link_id].valid = 1;
 
 	/* Parse the link info field */
 	ml_len -= sizeof(*ml) + common_info_len;
@@ -1031,9 +1286,11 @@ u16 hostapd_process_ml_assoc_req(struct hostapd_data *hapd,
 
 		if (*pos != MULTI_LINK_SUB_ELEM_ID_PER_STA_PROFILE) {
 			wpa_printf(MSG_DEBUG,
-				   "MLD: Unexpected Multi-Link element subelement ID=%u",
+				   "MLD: Skip unknown Multi-Link element subelement ID=%u",
 				   *pos);
-			goto out;
+			pos += 2 + sub_elem_len;
+			ml_len -= 2 + sub_elem_len;
+			continue;
 		}
 
 		/* Skip the subelement ID and the length */
@@ -1138,7 +1395,7 @@ u16 hostapd_process_ml_assoc_req(struct hostapd_data *hapd,
 		goto out;
 	}
 
-	ret = hostapd_mld_validate_assoc_info(hapd, info);
+	ret = hostapd_mld_validate_assoc_info(hapd, sta);
 out:
 	wpabuf_free(mlbuf);
 	if (ret) {

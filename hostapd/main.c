@@ -249,8 +249,12 @@ static int hostapd_driver_init(struct hostapd_iface *iface)
 	 * Use the configured MLD MAC address as the interface hardware address
 	 * if this AP is a part of an AP MLD.
 	 */
-	if (!is_zero_ether_addr(hapd->conf->mld_addr) && hapd->conf->mld_ap)
-		params.bssid = hapd->conf->mld_addr;
+	if (hapd->conf->mld_ap) {
+		if (!is_zero_ether_addr(hapd->conf->mld_addr))
+			params.bssid = hapd->conf->mld_addr;
+		else
+			params.bssid = NULL;
+	}
 #endif /* CONFIG_IEEE80211BE */
 
 	params.ifname = hapd->conf->iface;
@@ -339,6 +343,9 @@ setup_mld:
 				   "MLD: Not supported by the driver");
 			return -1;
 		}
+
+		/* Initialize the BSS parameter change to 1 */
+		hapd->eht_mld_bss_param_change = 1;
 
 		wpa_printf(MSG_DEBUG,
 			   "MLD: Set link_id=%u, mld_addr=" MACSTR

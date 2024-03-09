@@ -1144,15 +1144,6 @@ void wpas_notify_hs20_rx_deauth_imminent_notice(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_HS20 */
 }
 
-void wpas_notify_hs20_rx_terms_and_conditions_acceptance(
-		struct wpa_supplicant *wpa_s, const char *url) {
-#ifdef CONFIG_HS20
-	if (!wpa_s || !url)
-		return;
-
-	wpas_aidl_notify_hs20_rx_terms_and_conditions_acceptance(wpa_s, url);
-#endif /* CONFIG_HS20 */
-}
 
 
 #ifdef CONFIG_NAN_USD
@@ -1580,4 +1571,17 @@ void wpas_notify_qos_policy_scs_response(struct wpa_supplicant *wpa_s,
 		return;
 
 	wpas_aidl_notify_qos_policy_scs_response(wpa_s, num_scs_resp, scs_resp);
+}
+
+void wpas_notify_hs20_t_c_acceptance(struct wpa_supplicant *wpa_s,
+				     const char *url)
+{
+#ifdef CONFIG_HS20
+	if (!wpa_s || !url)
+		return;
+
+	wpa_msg(wpa_s, MSG_INFO, HS20_T_C_ACCEPTANCE "%s", url);
+	wpas_aidl_notify_hs20_rx_terms_and_conditions_acceptance(wpa_s, url);
+	wpas_dbus_signal_hs20_t_c_acceptance(wpa_s, url);
+#endif /* CONFIG_HS20 */
 }

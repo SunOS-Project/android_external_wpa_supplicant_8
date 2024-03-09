@@ -183,8 +183,15 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
 	wconf->oci_freq_override_ft_assoc = conf->oci_freq_override_ft_assoc;
 	wconf->oci_freq_override_fils_assoc =
 		conf->oci_freq_override_fils_assoc;
+
 	wconf->skip_send_eapol = iconf->skip_send_eapol;
 	wconf->enable_eapol_large_timeout = iconf->enable_eapol_large_timeout;
+
+	if (conf->eapol_m1_elements)
+		wconf->eapol_m1_elements = wpabuf_dup(conf->eapol_m1_elements);
+	if (conf->eapol_m3_elements)
+		wconf->eapol_m3_elements = wpabuf_dup(conf->eapol_m3_elements);
+	wconf->eapol_m3_no_encrypt = conf->eapol_m3_no_encrypt;
 #endif /* CONFIG_TESTING_OPTIONS */
 #ifdef CONFIG_P2P
 	os_memcpy(wconf->ip_addr_go, conf->ip_addr_go, 4);
@@ -556,7 +563,8 @@ int hostapd_wpa_auth_send_eapol(void *ctx, const u8 *addr,
 	if (sta) {
 		flags = hostapd_sta_flags_to_drv(sta->flags);
 #ifdef CONFIG_IEEE80211BE
-		if (sta->mld_info.mld_sta && (sta->flags & WLAN_STA_AUTHORIZED))
+		if (ap_sta_is_mld(hapd, sta) &&
+		    (sta->flags & WLAN_STA_AUTHORIZED))
 			link_id = -1;
 #endif /* CONFIG_IEEE80211BE */
 	}
@@ -1157,17 +1165,25 @@ static int hostapd_wpa_auth_set_vlan(void *ctx, const u8 *sta_addr,
 	if (!sta || !sta->wpa_sm)
 		return -1;
 
-	if (vlan->notempty &&
-	    !hostapd_vlan_valid(hapd->conf->vlan, vlan)) {
-		hostapd_logger(hapd, sta->addr, HOSTAPD_MODULE_IEEE80211,
-			       HOSTAPD_LEVEL_INFO,
-			       "Invalid VLAN %d%s received from FT",
-			       vlan->untagged, vlan->tagged[0] ? "+" : "");
-		return -1;
-	}
+	if (!(hapd->iface->drv_flags & WPA_DRIVER_FLAGS_VLAN_OFFLOAD)) {
+		if (vlan->notempty &&
+		    !hostapd_vlan_valid(hapd->conf->vlan, vlan)) {
+			hostapd_logger(hapd, sta->addr,
+				       HOSTAPD_MODULE_IEEE80211,
+				       HOSTAPD_LEVEL_INFO,
+				       "Invalid VLAN %d%s received from FT",
+				       vlan->untagged, vlan->tagged[0] ?
+				       "+" : "");
+			return -1;
+		}
 
-	if (ap_sta_set_vlan(hapd, sta, vlan) < 0)
-		return -1;
+		if (ap_sta_set_vlan(hapd, sta, vlan) < 0)
+			return -1;
+
+	} else {
+		if (vlan->notempty)
+			sta->vlan_id = vlan->untagged;
+	}
 	/* Configure wpa_group for GTK but ignore error due to driver not
 	 * knowing this STA. */
 	ap_sta_bind_vlan(hapd, sta);
@@ -1190,10 +1206,15 @@ static int hostapd_wpa_auth_get_vlan(void *ctx, const u8 *sta_addr,
 	if (!sta)
 		return -1;
 
-	if (sta->vlan_desc)
+	if (sta->vlan_desc) {
 		*vlan = *sta->vlan_desc;
-	else
+	} else if ((hapd->iface->drv_flags & WPA_DRIVER_FLAGS_VLAN_OFFLOAD) &&
+		   sta->vlan_id) {
+		vlan->notempty = 1;
+		vlan->untagged = sta->vlan_id;
+	} else {
 		os_memset(vlan, 0, sizeof(*vlan));
+	}
 
 	return 0;
 }
@@ -1540,7 +1561,8 @@ static int hostapd_wpa_auth_get_ml_rsn_info(void *ctx,
 
 			if (!iface->bss[0]->conf->mld_ap ||
 			    hapd->conf->mld_id != iface->bss[0]->conf->mld_id ||
-			    link_id != iface->bss[0]->mld_link_id)
+			    link_id != iface->bss[0]->mld_link_id ||
+			    !iface->bss[0]->wpa_auth)
 				continue;
 
 			wpa_auth_ml_get_rsn_info(iface->bss[0]->wpa_auth,
@@ -1582,7 +1604,8 @@ static int hostapd_wpa_auth_get_ml_key_info(void *ctx,
 
 			if (!iface->bss[0]->conf->mld_ap ||
 			    hapd->conf->mld_id != iface->bss[0]->conf->mld_id ||
-			    link_id != iface->bss[0]->mld_link_id)
+			    link_id != iface->bss[0]->mld_link_id ||
+			    !iface->bss[0]->wpa_auth)
 				continue;
 
 			wpa_auth_ml_get_key_info(iface->bss[0]->wpa_auth,
@@ -1675,9 +1698,13 @@ int hostapd_setup_wpa(struct hostapd_data *hapd)
 	};
 	const u8 *wpa_ie;
 	size_t wpa_ie_len;
+	struct hostapd_data *tx_bss;
 
 	hostapd_wpa_auth_conf(hapd->conf, hapd->iconf, &_conf);
 	_conf.msg_ctx = hapd->msg_ctx;
+	tx_bss = hostapd_mbssid_get_tx_bss(hapd);
+	if (tx_bss != hapd)
+		_conf.tx_bss_auth = tx_bss->wpa_auth;
 	if (hapd->iface->drv_flags & WPA_DRIVER_FLAGS_EAPOL_TX_STATUS)
 		_conf.tx_status = 1;
 	if (hapd->iface->drv_flags & WPA_DRIVER_FLAGS_AP_MLME)

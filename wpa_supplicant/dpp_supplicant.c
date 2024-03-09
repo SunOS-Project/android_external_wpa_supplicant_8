@@ -1935,7 +1935,11 @@ static void wpas_dpp_start_gas_client(struct wpa_supplicant *wpa_s)
 	offchannel_send_action_done(wpa_s);
 	wpas_dpp_listen_stop(wpa_s);
 
+#ifdef CONFIG_NO_RRM
+	supp_op_classes = NULL;
+#else /* CONFIG_NO_RRM */
 	supp_op_classes = wpas_supp_op_classes(wpa_s);
+#endif /* CONFIG_NO_RRM */
 	buf = dpp_build_conf_req_helper(auth, wpa_s->conf->dpp_name,
 					wpa_s->dpp_netrole,
 					wpa_s->conf->dpp_mud_url,
@@ -4159,6 +4163,13 @@ wpas_dpp_gas_req_handler(void *ctx, void *resp_ctx, const u8 *sa,
 		 * exchange. */
 		dpp_notify_auth_success(auth, 1);
 		wpa_s->dpp_auth_ok_on_ack = 0;
+#ifdef CONFIG_TESTING_OPTIONS
+		if (dpp_test == DPP_TEST_STOP_AT_AUTH_CONF) {
+			wpa_printf(MSG_INFO,
+				   "DPP: TESTING - stop at Authentication Confirm");
+			return NULL;
+		}
+#endif /* CONFIG_TESTING_OPTIONS */
 	}
 
 	wpa_hexdump(MSG_DEBUG,
@@ -5692,6 +5703,8 @@ void wpas_dpp_push_button_stop(struct wpa_supplicant *wpa_s)
 	if (wpa_s->dpp_pb_bi) {
 		char id[20];
 
+		if (wpa_s->dpp_pb_bi == wpa_s->dpp_pkex_bi)
+			wpa_s->dpp_pkex_bi = NULL;
 		os_snprintf(id, sizeof(id), "%u", wpa_s->dpp_pb_bi->id);
 		dpp_bootstrap_remove(wpa_s->dpp, id);
 		wpa_s->dpp_pb_bi = NULL;

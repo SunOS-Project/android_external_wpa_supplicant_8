@@ -9,6 +9,7 @@
 #ifndef COMMON_H
 #define COMMON_H
 
+#include "includes.h"
 #include "os.h"
 
 #if defined(__linux__) || defined(__GLIBC__)
@@ -439,6 +440,13 @@ void perror(const char *s);
 
 #ifndef BIT
 #define BIT(x) (1U << (x))
+#endif
+
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+#ifndef MAX
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #endif
 
 /*

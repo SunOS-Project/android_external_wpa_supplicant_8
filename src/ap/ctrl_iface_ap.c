@@ -830,6 +830,17 @@ int hostapd_ctrl_iface_status(struct hostapd_data *hapd, char *buf,
 		if (os_snprintf_error(buflen - len, ret))
 			return len;
 		len += ret;
+
+		if (is_6ghz_op_class(iface->conf->op_class) &&
+		    hostapd_get_oper_chwidth(iface->conf) ==
+		    CONF_OPER_CHWIDTH_320MHZ) {
+			ret = os_snprintf(buf + len, buflen - len,
+					  "eht_bw320_offset=%d\n",
+					  iface->conf->eht_bw320_offset);
+			if (os_snprintf_error(buflen - len, ret))
+				return len;
+			len += ret;
+		}
 	}
 #endif /* CONFIG_IEEE80211BE */
 
@@ -1095,7 +1106,7 @@ int hostapd_ctrl_iface_pmksa_add(struct hostapd_data *hapd, char *cmd)
 		return -1;
 
 	return wpa_auth_pmksa_add2(hapd->wpa_auth, spa, pmk, pmk_len,
-				   pmkid, expiration, akmp);
+				   pmkid, expiration, akmp, NULL);
 }
 
 
@@ -1316,6 +1327,8 @@ int hostapd_ctrl_iface_bss_tm_req(struct hostapd_data *hapd,
 		req_mode |= WNM_BSS_TM_REQ_ABRIDGED;
 	if (os_strstr(cmd, " disassoc_imminent=1"))
 		req_mode |= WNM_BSS_TM_REQ_DISASSOC_IMMINENT;
+	if (os_strstr(cmd, " link_removal_imminent=1"))
+		req_mode |= WNM_BSS_TM_REQ_LINK_REMOVAL_IMMINENT;
 
 #ifdef CONFIG_MBO
 	pos = os_strstr(cmd, "mbo=");

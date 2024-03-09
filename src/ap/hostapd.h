@@ -473,6 +473,13 @@ struct hostapd_data {
        unsigned char ctrl_iface_cookie[CTRL_IFACE_COOKIE_LEN];
 #endif /* CONFIG_CTRL_IFACE_UDP */
 
+#ifdef CONFIG_IEEE80211BE
+	u8 eht_mld_bss_param_change;
+#ifdef CONFIG_TESTING_OPTIONS
+	u8 eht_mld_link_removal_count;
+#endif /* CONFIG_TESTING_OPTIONS */
+#endif /* CONFIG_IEEE80211BE */
+
 #ifdef CONFIG_NAN_USD
 	struct nan_de *nan_de;
 #endif /* CONFIG_NAN_USD */
@@ -778,5 +785,25 @@ struct hostapd_data * hostapd_mbssid_get_tx_bss(struct hostapd_data *hapd);
 int hostapd_mbssid_get_bss_index(struct hostapd_data *hapd);
 struct hostapd_data * hostapd_mld_get_link_bss(struct hostapd_data *hapd,
 					       u8 link_id);
+int hostapd_link_remove(struct hostapd_data *hapd, u32 count);
+
+#ifdef CONFIG_IEEE80211BE
+#define for_each_mld_link(_link, _bss_idx, _iface_idx, _ifaces, _mld_id) \
+	for (_iface_idx = 0;						\
+	     _iface_idx < (_ifaces)->count;				\
+	     _iface_idx++)						\
+		for (_bss_idx = 0;					\
+		     _bss_idx <						\
+			(_ifaces)->iface[_iface_idx]->num_bss;		\
+		     _bss_idx++)					\
+			for (_link =					\
+			     (_ifaces)->iface[_iface_idx]->bss[_bss_idx]; \
+			    _link && _link->conf->mld_ap &&		\
+				_link->conf->mld_id == _mld_id;		\
+			    _link = NULL)
+#else /* CONFIG_IEEE80211BE */
+#define for_each_mld_link(_link, _bss_idx, _iface_idx, _ifaces, _mld_id) \
+	if (false)
+#endif /* CONFIG_IEEE80211BE */
 
 #endif /* HOSTAPD_H */

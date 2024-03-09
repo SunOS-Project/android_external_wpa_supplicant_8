@@ -1,6 +1,6 @@
 /*
  * hostapd / IEEE 802.11 Management
- * Copyright (c) 2002-2012, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2002-2024, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -21,16 +21,25 @@
 #include "ieee802_11.h"
 
 
+static u8 * hostapd_eid_timeout_interval(u8 *pos, u8 type, u32 value)
+{
+	*pos++ = WLAN_EID_TIMEOUT_INTERVAL;
+	*pos++ = 5;
+	*pos++ = type;
+	WPA_PUT_LE32(pos, value);
+	pos += 4;
+
+	return pos;
+}
+
+
 u8 * hostapd_eid_assoc_comeback_time(struct hostapd_data *hapd,
 				     struct sta_info *sta, u8 *eid)
 {
-	u8 *pos = eid;
 	u32 timeout, tu;
 	struct os_reltime now, passed;
+	u8 type = WLAN_TIMEOUT_ASSOC_COMEBACK;
 
-	*pos++ = WLAN_EID_TIMEOUT_INTERVAL;
-	*pos++ = 5;
-	*pos++ = WLAN_TIMEOUT_ASSOC_COMEBACK;
 	os_get_reltime(&now);
 	os_reltime_sub(&now, &sta->sa_query_start, &passed);
 	tu = (passed.sec * 1000000 + passed.usec) / 1024;
@@ -40,10 +49,12 @@ u8 * hostapd_eid_assoc_comeback_time(struct hostapd_data *hapd,
 		timeout = 0;
 	if (timeout < hapd->conf->assoc_sa_query_max_timeout)
 		timeout++; /* add some extra time for local timers */
-	WPA_PUT_LE32(pos, timeout);
-	pos += 4;
 
-	return pos;
+#ifdef CONFIG_TESTING_OPTIONS
+	if (hapd->conf->test_assoc_comeback_type != -1)
+		type = hapd->conf->test_assoc_comeback_type;
+#endif /* CONFIG_TESTING_OPTIONS */
+	return hostapd_eid_timeout_interval(eid, type, timeout);
 }
 
 
@@ -51,13 +62,14 @@ u8 * hostapd_eid_assoc_comeback_time(struct hostapd_data *hapd,
 void ieee802_11_send_sa_query_req(struct hostapd_data *hapd,
 				  const u8 *addr, const u8 *trans_id)
 {
-#ifdef CONFIG_OCV
-	struct sta_info *sta;
-#endif /* CONFIG_OCV */
+#if defined(CONFIG_OCV) || defined(CONFIG_IEEE80211BE)
+	struct sta_info *sta = ap_get_sta(hapd, addr);
+#endif /* CONFIG_OCV || CONFIG_IEEE80211BE */
 	struct ieee80211_mgmt *mgmt;
 	u8 *oci_ie = NULL;
 	u8 oci_ie_len = 0;
 	u8 *end;
+	const u8 *own_addr = hapd->own_addr;
 
 	wpa_printf(MSG_DEBUG, "IEEE 802.11: Sending SA Query Request to "
 		   MACSTR, MAC2STR(addr));
@@ -65,7 +77,6 @@ void ieee802_11_send_sa_query_req(struct hostapd_data *hapd,
 		    trans_id, WLAN_SA_QUERY_TR_ID_LEN);
 
 #ifdef CONFIG_OCV
-	sta = ap_get_sta(hapd, addr);
 	if (sta && wpa_auth_uses_ocv(sta->wpa_sm)) {
 		struct wpa_channel_info ci;
 
@@ -108,11 +119,16 @@ void ieee802_11_send_sa_query_req(struct hostapd_data *hapd,
 		return;
 	}
 
+#ifdef CONFIG_IEEE80211BE
+	if (ap_sta_is_mld(hapd, sta))
+		own_addr = hapd->mld_addr;
+#endif /* CONFIG_IEEE80211BE */
+
 	mgmt->frame_control = IEEE80211_FC(WLAN_FC_TYPE_MGMT,
 					   WLAN_FC_STYPE_ACTION);
 	os_memcpy(mgmt->da, addr, ETH_ALEN);
-	os_memcpy(mgmt->sa, hapd->own_addr, ETH_ALEN);
-	os_memcpy(mgmt->bssid, hapd->own_addr, ETH_ALEN);
+	os_memcpy(mgmt->sa, own_addr, ETH_ALEN);
+	os_memcpy(mgmt->bssid, own_addr, ETH_ALEN);
 	mgmt->u.action.category = WLAN_ACTION_SA_QUERY;
 	mgmt->u.action.u.sa_query_req.action = WLAN_SA_QUERY_REQUEST;
 	os_memcpy(mgmt->u.action.u.sa_query_req.trans_id, trans_id,
@@ -141,6 +157,7 @@ static void ieee802_11_send_sa_query_resp(struct hostapd_data *hapd,
 	u8 *oci_ie = NULL;
 	u8 oci_ie_len = 0;
 	u8 *end;
+	const u8 *own_addr = hapd->own_addr;
 
 	wpa_printf(MSG_DEBUG, "IEEE 802.11: Received SA Query Request from "
 		   MACSTR, MAC2STR(sa));
@@ -200,11 +217,16 @@ static void ieee802_11_send_sa_query_resp(struct hostapd_data *hapd,
 	wpa_printf(MSG_DEBUG, "IEEE 802.11: Sending SA Query Response to "
 		   MACSTR, MAC2STR(sa));
 
+#ifdef CONFIG_IEEE80211BE
+	if (ap_sta_is_mld(hapd, sta))
+		own_addr = hapd->mld_addr;
+#endif /* CONFIG_IEEE80211BE */
+
 	resp->frame_control = IEEE80211_FC(WLAN_FC_TYPE_MGMT,
 					   WLAN_FC_STYPE_ACTION);
 	os_memcpy(resp->da, sa, ETH_ALEN);
-	os_memcpy(resp->sa, hapd->own_addr, ETH_ALEN);
-	os_memcpy(resp->bssid, hapd->own_addr, ETH_ALEN);
+	os_memcpy(resp->sa, own_addr, ETH_ALEN);
+	os_memcpy(resp->bssid, own_addr, ETH_ALEN);
 	resp->u.action.category = WLAN_ACTION_SA_QUERY;
 	resp->u.action.u.sa_query_req.action = WLAN_SA_QUERY_RESPONSE;
 	os_memcpy(resp->u.action.u.sa_query_req.trans_id, trans_id,
@@ -1156,4 +1178,45 @@ bool hostapd_get_ht_vht_twt_responder(struct hostapd_data *hapd)
 		 (hapd->iconf->ieee80211ac && !hapd->conf->disable_11ac)) &&
 		(hapd->iface->drv_flags2 &
 		 WPA_DRIVER_FLAGS2_HT_VHT_TWT_RESPONDER);
+}
+
+
+struct sta_info * hostapd_ml_get_assoc_sta(struct hostapd_data *hapd,
+					   struct sta_info *sta,
+					   struct hostapd_data **assoc_hapd)
+{
+#ifdef CONFIG_IEEE80211BE
+	struct hostapd_data *other_hapd = NULL;
+	struct sta_info *tmp_sta;
+
+	if (!ap_sta_is_mld(hapd, sta))
+		return NULL;
+
+	*assoc_hapd = hapd;
+
+	/* The station is the one on which the association was performed */
+	if (sta->mld_assoc_link_id == hapd->mld_link_id)
+		return sta;
+
+	other_hapd = hostapd_mld_get_link_bss(hapd, sta->mld_assoc_link_id);
+	if (!other_hapd) {
+		wpa_printf(MSG_DEBUG, "MLD: No link match for link_id=%u",
+			   sta->mld_assoc_link_id);
+		return sta;
+	}
+
+	/*
+	 * Iterate over the stations and find the one with the matching link ID
+	 * and association ID.
+	 */
+	for (tmp_sta = other_hapd->sta_list; tmp_sta; tmp_sta = tmp_sta->next) {
+		if (tmp_sta->mld_assoc_link_id == sta->mld_assoc_link_id &&
+		    tmp_sta->aid == sta->aid) {
+			*assoc_hapd = other_hapd;
+			return tmp_sta;
+		}
+	}
+#endif /* CONFIG_IEEE80211BE */
+
+	return sta;
 }
