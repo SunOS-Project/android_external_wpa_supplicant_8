@@ -1559,8 +1559,7 @@ static int hostapd_wpa_auth_get_ml_rsn_info(void *ctx,
 			struct hostapd_iface *iface =
 				hapd->iface->interfaces->iface[j];
 
-			if (!iface->bss[0]->conf->mld_ap ||
-			    hapd->conf->mld_id != iface->bss[0]->conf->mld_id ||
+			if (!hostapd_is_ml_partner(hapd, iface->bss[0]) ||
 			    link_id != iface->bss[0]->mld_link_id ||
 			    !iface->bss[0]->wpa_auth)
 				continue;
@@ -1602,8 +1601,7 @@ static int hostapd_wpa_auth_get_ml_key_info(void *ctx,
 			struct hostapd_iface *iface =
 				hapd->iface->interfaces->iface[j];
 
-			if (!iface->bss[0]->conf->mld_ap ||
-			    hapd->conf->mld_id != iface->bss[0]->conf->mld_id ||
+			if (!hostapd_is_ml_partner(hapd, iface->bss[0]) ||
 			    link_id != iface->bss[0]->mld_link_id ||
 			    !iface->bss[0]->wpa_auth)
 				continue;

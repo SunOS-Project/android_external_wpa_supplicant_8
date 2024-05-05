@@ -18,9 +18,6 @@
 #include <netlink/genl/genl.h>
 #include <netlink/genl/ctrl.h>
 #include <netlink/genl/family.h>
-#ifdef CONFIG_LIBNL3_ROUTE
-#include <netlink/route/neighbour.h>
-#endif /* CONFIG_LIBNL3_ROUTE */
 #include <linux/rtnetlink.h>
 #include <netpacket/packet.h>
 #include <linux/errqueue.h>
@@ -2297,7 +2294,6 @@ static void * wpa_driver_nl80211_drv_init(void *ctx, const char *ifname,
 {
 	struct wpa_driver_nl80211_data *drv;
 	struct i802_bss *bss;
-	unsigned int i;
 	char path[128], buf[200], *pos;
 	ssize_t len;
 	int ret;
@@ -2397,15 +2393,11 @@ skip_wifi_status:
 	}
 
 	/*
-	 * Set the default link to be the first one, and set its address to that
-	 * of the interface.
+	 * Use link ID 0 for the single "link" of a non-MLD.
 	 */
+	bss->valid_links = 0;
 	bss->flink = &bss->links[0];
-	bss->n_links = 1;
 	os_memcpy(bss->flink->addr, bss->addr, ETH_ALEN);
-
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++)
-		bss->links[i].link_id = NL80211_DRV_LINK_ID_NA;
 
 	return bss;
 
@@ -3093,31 +3085,31 @@ wpa_driver_nl80211_finish_drv_init(struct wpa_driver_nl80211_data *drv,
 
 
 static int wpa_driver_nl80211_del_beacon(struct i802_bss *bss,
-					 struct i802_link *link)
+					 int link_id)
 {
 	struct nl_msg *msg;
 	struct wpa_driver_nl80211_data *drv = bss->drv;
+	struct i802_link *link = nl80211_get_link(bss, link_id);
 
 	if (!link->beacon_set)
 		return 0;
 
 	wpa_printf(MSG_DEBUG, "nl80211: Remove beacon (ifindex=%d)",
-		   drv->ifindex);
+		   bss->ifindex);
 	link->beacon_set = 0;
 	link->freq = 0;
 
 	nl80211_put_wiphy_data_ap(bss);
-	msg = nl80211_drv_msg(drv, 0, NL80211_CMD_DEL_BEACON);
+	msg = nl80211_bss_msg(bss, 0, NL80211_CMD_DEL_BEACON);
 	if (!msg)
 		return -ENOBUFS;
 
-	if (link->link_id != NL80211_DRV_LINK_ID_NA) {
+	if (link_id != NL80211_DRV_LINK_ID_NA) {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: MLD: stop beaconing on link=%u",
-			   link->link_id);
+			   link_id);
 
-		if (nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID,
-			       link->link_id)) {
+		if (nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id)) {
 			nlmsg_free(msg);
 			return -ENOBUFS;
 		}
@@ -3129,10 +3121,10 @@ static int wpa_driver_nl80211_del_beacon(struct i802_bss *bss,
 
 static void wpa_driver_nl80211_del_beacon_all(struct i802_bss *bss)
 {
-	unsigned int i;
+	int link_id;
 
-	for (i = 0; i < bss->n_links; i++)
-		wpa_driver_nl80211_del_beacon(bss, &bss->links[i]);
+	for_each_link_default(bss->valid_links, link_id, NL80211_DRV_LINK_ID_NA)
+		wpa_driver_nl80211_del_beacon(bss, link_id);
 }
 
 
@@ -4272,14 +4264,11 @@ int wpa_driver_nl80211_authenticate_retry(struct wpa_driver_nl80211_data *drv)
 
 struct i802_link * nl80211_get_link(struct i802_bss *bss, s8 link_id)
 {
-	unsigned int i;
+	if (link_id < 0 || link_id >= MAX_NUM_MLD_LINKS)
+		return bss->flink;
 
-	for (i = 0; i < bss->n_links; i++) {
-		if (bss->links[i].link_id != link_id)
-			continue;
-
-		return &bss->links[i];
-	}
+	if (BIT(link_id) & bss->valid_links)
+		return &bss->links[link_id];
 
 	return bss->flink;
 }
@@ -4296,9 +4285,9 @@ static void nl80211_link_set_freq(struct i802_bss *bss, s8 link_id, int freq)
 static int nl80211_get_link_freq(struct i802_bss *bss, const u8 *addr,
 				 bool bss_freq_debug)
 {
-	size_t i;
+	u8 i;
 
-	for (i = 0; i < bss->n_links; i++) {
+	for_each_link(bss->valid_links, i) {
 		if (ether_addr_equal(bss->links[i].addr, addr)) {
 			wpa_printf(MSG_DEBUG,
 				   "nl80211: Use link freq=%d for address "
@@ -5139,20 +5128,18 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 #endif /* CONFIG_MESH */
 
 	if (params->mld_ap) {
-		size_t i;
-
-		for (i = 0; i < bss->n_links; i++) {
-			if (bss->links[i].link_id == params->mld_link_id) {
-				link = &bss->links[i];
-				break;
-			}
-		}
-
-		if (i == bss->n_links) {
-			wpa_printf(MSG_DEBUG, "nl80211: Link ID=%u not found",
-				   params->mld_link_id);
+		if (!nl80211_link_valid(bss->valid_links,
+					params->mld_link_id)) {
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: Link ID=%u invalid (valid: 0x%04x)",
+				   params->mld_link_id, bss->valid_links);
 			return -EINVAL;
 		}
+
+		link = nl80211_get_link(bss, params->mld_link_id);
+	} else if (bss->valid_links) {
+		wpa_printf(MSG_DEBUG, "nl80211: MLD configuration expected");
+		return -EINVAL;
 	}
 
 	beacon_set = params->reenable ? 0 : link->beacon_set;
@@ -5193,13 +5180,12 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 			   params->mld_link_id);
 
 		if (nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID,
-			       params->mld_link_id) ||
-		    (params->freq &&
-		     nl80211_put_freq_params(msg, params->freq) < 0))
+			       params->mld_link_id))
 			goto fail;
 
-		nl80211_link_set_freq(bss, params->mld_link_id,
-				      params->freq->freq);
+		if (params->freq)
+			nl80211_link_set_freq(bss, params->mld_link_id,
+					      params->freq->freq);
 	}
 
 	if (params->proberesp && params->proberesp_len) {
@@ -5407,6 +5393,9 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 		nla_nest_end(msg, ftm);
 	}
 
+	if (params->freq && nl80211_put_freq_params(msg, params->freq) < 0)
+		goto fail;
+
 #ifdef CONFIG_IEEE80211AX
 	if (params->he_spr_ctrl) {
 		struct nlattr *spr;
@@ -5440,9 +5429,6 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 
 		nla_nest_end(msg, spr);
 	}
-
-	if (params->freq && nl80211_put_freq_params(msg, params->freq) < 0)
-		goto fail;
 
 	if (params->freq && params->freq->he_enabled &&
 	    nl80211_attr_supported(drv, NL80211_ATTR_HE_BSS_COLOR)) {
@@ -5562,27 +5548,6 @@ fail:
 }
 
 
-static bool nl80211_link_valid(struct i802_bss *bss, s8 link_id)
-{
-	unsigned int i;
-
-	if (link_id < 0)
-		return false;
-
-	for (i = 0; i < bss->n_links; i++) {
-		wpa_printf(MSG_DEBUG, "nl80211: %s - i=%u, link_id=%u",
-			   __func__, i, bss->links[i].link_id);
-		if (bss->links[i].link_id == NL80211_DRV_LINK_ID_NA)
-			continue;
-
-		if (bss->links[i].link_id == link_id)
-			return true;
-	}
-
-	return false;
-}
-
-
 static int nl80211_set_channel(struct i802_bss *bss,
 			       struct hostapd_freq_params *freq, int set_chan)
 {
@@ -5603,7 +5568,7 @@ static int nl80211_set_channel(struct i802_bss *bss,
 		return -1;
 	}
 
-	if (nl80211_link_valid(bss, freq->link_id)) {
+	if (nl80211_link_valid(bss->valid_links, freq->link_id)) {
 		wpa_printf(MSG_DEBUG, "nl80211: Set link_id=%u for freq",
 			   freq->link_id);
 
@@ -5969,26 +5934,25 @@ fail:
 
 static void rtnl_neigh_delete_fdb_entry(struct i802_bss *bss, const u8 *addr)
 {
-#ifdef CONFIG_LIBNL3_ROUTE
 	struct wpa_driver_nl80211_data *drv = bss->drv;
-	struct rtnl_neigh *rn;
-	struct nl_addr *nl_addr;
+	struct ndmsg nhdr = {
+		.ndm_state = NUD_PERMANENT,
+		.ndm_ifindex = bss->ifindex,
+		.ndm_family = AF_BRIDGE,
+	};
+	struct nl_msg *msg;
 	int err;
 
-	rn = rtnl_neigh_alloc();
-	if (!rn)
+	msg = nlmsg_alloc_simple(RTM_DELNEIGH, NLM_F_CREATE);
+	if (!msg)
 		return;
 
-	rtnl_neigh_set_family(rn, AF_BRIDGE);
-	rtnl_neigh_set_ifindex(rn, bss->ifindex);
-	nl_addr = nl_addr_build(AF_BRIDGE, (void *) addr, ETH_ALEN);
-	if (!nl_addr) {
-		rtnl_neigh_put(rn);
-		return;
-	}
-	rtnl_neigh_set_lladdr(rn, nl_addr);
+	if (nlmsg_append(msg, &nhdr, sizeof(nhdr), NLMSG_ALIGNTO) < 0 ||
+	    nla_put(msg, NDA_LLADDR, ETH_ALEN, (void *) addr) ||
+	    nl_send_auto_complete(drv->rtnl_sk, msg) < 0)
+		goto errout;
 
-	err = rtnl_neigh_delete(drv->rtnl_sk, rn, 0);
+	err = nl_wait_for_ack(drv->rtnl_sk);
 	if (err < 0) {
 		wpa_printf(MSG_DEBUG, "nl80211: bridge FDB entry delete for "
 			   MACSTR " ifindex=%d failed: %s", MAC2STR(addr),
@@ -5998,9 +5962,8 @@ static void rtnl_neigh_delete_fdb_entry(struct i802_bss *bss, const u8 *addr)
 			   MACSTR, MAC2STR(addr));
 	}
 
-	nl_addr_put(nl_addr);
-	rtnl_neigh_put(rn);
-#endif /* CONFIG_LIBNL3_ROUTE */
+errout:
+	nlmsg_free(msg);
 }
 
 
@@ -6797,7 +6760,6 @@ static int nl80211_connect_common(struct wpa_driver_nl80211_data *drv,
 	if (params->mld_params.mld_addr && params->mld_params.valid_links > 0) {
 		struct wpa_driver_mld_params *mld_params = &params->mld_params;
 		struct nlattr *links, *attr;
-		int i;
 		u8 link_id;
 
 		wpa_printf(MSG_DEBUG, "  * MLD: MLD addr=" MACSTR,
@@ -6813,31 +6775,8 @@ static int nl80211_connect_common(struct wpa_driver_nl80211_data *drv,
 		if (!links)
 			return -1;
 
-		attr = nla_nest_start(msg, 0);
-		if (!attr)
-			return -1;
-
-		/* First add the association link ID */
-		link_id = mld_params->assoc_link_id;
-		if (nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id) ||
-		    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN,
-			    mld_params->mld_links[link_id].bssid) ||
-		    nla_put_u32(msg, NL80211_ATTR_WIPHY_FREQ,
-				mld_params->mld_links[link_id].freq))
-			return -1;
-
-		os_memcpy(drv->sta_mlo_info.links[link_id].bssid,
-			  mld_params->mld_links[link_id].bssid, ETH_ALEN);
-
-		nla_nest_end(msg, attr);
-
-		for (i = 1, link_id = 0; link_id < MAX_NUM_MLD_LINKS;
-		     link_id++) {
-			if (!(mld_params->valid_links & BIT(link_id)) ||
-			    link_id == mld_params->assoc_link_id)
-				continue;
-
-			attr = nla_nest_start(msg, i);
+		for_each_link(mld_params->valid_links, link_id) {
+			attr = nla_nest_start(msg, 0);
 			if (!attr)
 				return -1;
 
@@ -6847,11 +6786,11 @@ static int nl80211_connect_common(struct wpa_driver_nl80211_data *drv,
 				    mld_params->mld_links[link_id].bssid) ||
 			    nla_put_u32(msg, NL80211_ATTR_WIPHY_FREQ,
 					mld_params->mld_links[link_id].freq) ||
-			    (mld_params->mld_links[i].disabled &&
+			    (mld_params->mld_links[link_id].disabled &&
 			     nla_put_flag(msg,
 					  NL80211_ATTR_MLO_LINK_DISABLED)) ||
 			    (mld_params->mld_links[link_id].ies &&
-			     mld_params->mld_links[i].ies_len &&
+			     mld_params->mld_links[link_id].ies_len &&
 			     nla_put(msg, NL80211_ATTR_IE,
 				     mld_params->mld_links[link_id].ies_len,
 				     mld_params->mld_links[link_id].ies)))
@@ -6861,7 +6800,6 @@ static int nl80211_connect_common(struct wpa_driver_nl80211_data *drv,
 				  mld_params->mld_links[link_id].bssid,
 				  ETH_ALEN);
 			nla_nest_end(msg, attr);
-			i++;
 		}
 
 		nla_nest_end(msg, links);
@@ -7438,10 +7376,7 @@ static int wpa_driver_nl80211_associate(
 
 		/* Error and force TEST_FAIL checking for each link */
 		ret = -EINVAL;
-		for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-			if (!(params->mld_params.valid_links & BIT(i)))
-				continue;
-
+		for_each_link(params->mld_params.valid_links, i) {
 			if (TEST_FAIL_TAG("link"))
 				err_info.link_id = i;
 		}
@@ -8776,7 +8711,6 @@ static void *i802_init(struct hostapd_data *hapd,
 	    (params->num_bridge == 0 || !params->bridge[0]))
 		add_ifidx(drv, br_ifindex, drv->ifindex);
 
-#ifdef CONFIG_LIBNL3_ROUTE
 	if (bss->added_if_into_bridge || bss->already_in_bridge) {
 		int err;
 
@@ -8793,7 +8727,6 @@ static void *i802_init(struct hostapd_data *hapd,
 			goto failed;
 		}
 	}
-#endif /* CONFIG_LIBNL3_ROUTE */
 
 	if (drv->capa.flags2 & WPA_DRIVER_FLAGS2_CONTROL_PORT_RX) {
 		wpa_printf(MSG_DEBUG,
@@ -9018,17 +8951,12 @@ static int wpa_driver_nl80211_if_add(void *priv, enum wpa_driver_if_type type,
 
 	if (type == WPA_IF_AP_BSS && setup_ap) {
 		struct i802_bss *new_bss = os_zalloc(sizeof(*new_bss));
-		unsigned int i;
 
 		if (new_bss == NULL) {
 			if (added)
 				nl80211_remove_iface(drv, ifidx);
 			return -1;
 		}
-
-		/* Initialize here before any failure path */
-		for (i = 0; i < MAX_NUM_MLD_LINKS; i++)
-			new_bss->links[i].link_id = NL80211_DRV_LINK_ID_NA;
 
 		if (bridge &&
 		    i802_check_bridge(drv, new_bss, bridge, ifname) < 0) {
@@ -9054,7 +8982,7 @@ static int wpa_driver_nl80211_if_add(void *priv, enum wpa_driver_if_type type,
 		new_bss->drv = drv;
 		new_bss->next = drv->first_bss->next;
 		new_bss->flink = &new_bss->links[0];
-		new_bss->n_links = 1;
+		new_bss->valid_links = 0;
 		os_memcpy(new_bss->flink->addr, new_bss->addr, ETH_ALEN);
 
 		new_bss->flink->freq = drv->first_bss->flink->freq;
@@ -9134,6 +9062,7 @@ static int wpa_driver_nl80211_if_remove(struct i802_bss *bss,
 				tbss->next = bss->next;
 				/* Unsubscribe management frames */
 				nl80211_teardown_ap(bss);
+				nl80211_remove_links(bss);
 				nl80211_destroy_bss(bss);
 				if (!bss->added_if)
 					i802_set_iface_flags(bss, 0);
@@ -9148,6 +9077,7 @@ static int wpa_driver_nl80211_if_remove(struct i802_bss *bss,
 	} else {
 		wpa_printf(MSG_DEBUG, "nl80211: First BSS - reassign context");
 		nl80211_teardown_ap(bss);
+		nl80211_remove_links(bss);
 		if (!bss->added_if && !drv->first_bss->next)
 			wpa_driver_nl80211_del_beacon_all(bss);
 		nl80211_destroy_bss(bss);
@@ -9156,6 +9086,7 @@ static int wpa_driver_nl80211_if_remove(struct i802_bss *bss,
 		if (drv->first_bss->next) {
 			drv->first_bss = drv->first_bss->next;
 			drv->ctx = drv->first_bss->ctx;
+			drv->ifindex = drv->first_bss->ifindex;
 			os_free(bss);
 		} else {
 			wpa_printf(MSG_DEBUG, "nl80211: No second BSS to reassign context to");
@@ -9396,10 +9327,7 @@ static int nl80211_put_any_link_id(struct nl_msg *msg,
 		return 0;
 
 	/* First try to pick a link that uses the same band */
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (!(mlo->valid_links & BIT(i)))
-			continue;
-
+	for_each_link(mlo->valid_links, i) {
 		if (any_valid_link_id == -1)
 			any_valid_link_id = i;
 
@@ -9594,59 +9522,81 @@ fail:
 }
 
 
-static void nl80211_remove_links(struct i802_bss *bss)
+static int nl80211_remove_link(struct i802_bss *bss, int link_id)
 {
 	struct wpa_driver_nl80211_data *drv = bss->drv;
+	struct i802_link *link;
 	struct nl_msg *msg;
+	size_t i;
+	int ret;
+
+	wpa_printf(MSG_DEBUG, "nl80211: Remove link (ifindex=%d link_id=%u)",
+		   bss->ifindex, link_id);
+
+	if (!(bss->valid_links & BIT(link_id))) {
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: MLD: remove link: Link not found");
+		return -1;
+	}
+
+	link = &bss->links[link_id];
+
+	wpa_driver_nl80211_del_beacon(bss, link_id);
+
+	/* First remove the link locally */
+	bss->valid_links &= ~BIT(link_id);
+	os_memset(link->addr, 0, ETH_ALEN);
+
+	/* Choose new deflink if we are removing that link */
+	if (bss->flink == link) {
+		for_each_link_default(bss->valid_links, i, 0) {
+			bss->flink = &bss->links[i];
+			break;
+		}
+	}
+
+	/* If this was the last link, reset default link */
+	if (!bss->valid_links) {
+		/* TODO: Does keeping freq/bandwidth make sense? */
+		if (bss->flink != link)
+			os_memcpy(bss->flink, link, sizeof(*link));
+
+		os_memcpy(bss->flink->addr, bss->addr, ETH_ALEN);
+	}
+
+	/* Remove the link from the kernel */
+	msg = nl80211_bss_msg(bss, 0, NL80211_CMD_REMOVE_LINK);
+	if (!msg ||
+	    nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id)) {
+		nlmsg_free(msg);
+		wpa_printf(MSG_ERROR,
+			   "nl80211: remove link (%d) failed", link_id);
+		return -1;
+	}
+
+	ret = send_and_recv_cmd(drv, msg);
+	if (ret)
+		wpa_printf(MSG_ERROR,
+			   "nl80211: remove link (%d) failed. ret=%d (%s)",
+			   link_id, ret, strerror(-ret));
+
+	return ret;
+}
+
+
+static void nl80211_remove_links(struct i802_bss *bss)
+{
 	int ret;
 	u8 link_id;
 
-	if (bss->n_links == 0)
-		return;
-
-	while (bss->links[0].link_id != NL80211_DRV_LINK_ID_NA) {
-		struct i802_link *link = &bss->links[0];
-
-		wpa_printf(MSG_DEBUG, "nl80211: MLD: remove link_id=%u",
-			   link->link_id);
-
-		wpa_driver_nl80211_del_beacon(bss, link);
-
-		link_id = link->link_id;
-
-		/* First remove the link locally */
-		if (bss->n_links == 1) {
-			bss->flink->link_id = NL80211_DRV_LINK_ID_NA;
-			os_memcpy(bss->flink->addr, bss->addr, ETH_ALEN);
-		} else {
-			struct i802_link *other = &bss->links[bss->n_links - 1];
-
-			os_memcpy(link, other, sizeof(*link));
-			other->link_id = NL80211_DRV_LINK_ID_NA;
-			os_memset(other->addr, 0, ETH_ALEN);
-
-			bss->n_links--;
-		}
-
-		/* Remove the link from the kernel */
-		msg = nl80211_drv_msg(drv, 0, NL80211_CMD_REMOVE_LINK);
-		if (!msg ||
-		    nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id)) {
-			nlmsg_free(msg);
-			wpa_printf(MSG_ERROR,
-				   "nl80211: remove link (%d) failed",
-				   link_id);
-			return;
-		}
-
-		ret = send_and_recv_cmd(drv, msg);
-		if (ret) {
-			wpa_printf(MSG_ERROR,
-				   "nl80211: remove link (%d) failed. ret=%d (%s)",
-				   link_id, ret, strerror(-ret));
-			return;
-		}
+	for_each_link(bss->valid_links, link_id) {
+		ret = nl80211_remove_link(bss, link_id);
+		if (ret)
+			break;
 	}
+
+	if (bss->flink)
+		os_memcpy(bss->flink->addr, bss->addr, ETH_ALEN);
 }
 
 
@@ -9659,7 +9609,7 @@ static int wpa_driver_nl80211_deinit_ap(void *priv)
 		return -1;
 
 	/* Stop beaconing */
-	wpa_driver_nl80211_del_beacon(bss, bss->flink);
+	wpa_driver_nl80211_del_beacon(bss, NL80211_DRV_LINK_ID_NA);
 
 	nl80211_remove_links(bss);
 
@@ -9674,7 +9624,7 @@ static int wpa_driver_nl80211_deinit_ap(void *priv)
 }
 
 
-static int wpa_driver_nl80211_stop_ap(void *priv)
+static int wpa_driver_nl80211_stop_ap(void *priv, int link_id)
 {
 	struct i802_bss *bss = priv;
 	struct wpa_driver_nl80211_data *drv = bss->drv;
@@ -9682,9 +9632,17 @@ static int wpa_driver_nl80211_stop_ap(void *priv)
 	if (!is_ap_interface(drv->nlmode))
 		return -1;
 
-	wpa_driver_nl80211_del_beacon_all(bss);
+	if (link_id == -1) {
+		wpa_driver_nl80211_del_beacon_all(bss);
+		return 0;
+	}
 
-	return 0;
+	if (nl80211_link_valid(bss->valid_links, link_id)) {
+		wpa_driver_nl80211_del_beacon(bss, link_id);
+		return 0;
+	}
+
+	return -1;
 }
 
 
@@ -9837,10 +9795,7 @@ static int get_links_noise(struct nl_msg *msg, void *arg)
 	if (!sinfo[NL80211_SURVEY_INFO_NOISE])
 		return NL_SKIP;
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (!(mlo_sig->valid_links & BIT(i)))
-			continue;
-
+	for_each_link(mlo_sig->valid_links, i) {
 		if (nla_get_u32(sinfo[NL80211_SURVEY_INFO_FREQUENCY]) !=
 		    mlo_sig->links[i].frequency)
 			continue;
@@ -9933,10 +9888,7 @@ static int nl80211_mlo_signal_poll(void *priv,
 	os_memset(mlo_si, 0, sizeof(*mlo_si));
 	mlo_si->valid_links = drv->sta_mlo_info.valid_links;
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (!(mlo_si->valid_links & BIT(i)))
-			continue;
-
+	for_each_link(mlo_si->valid_links, i) {
 		res = nl80211_get_link_signal(drv,
 					      drv->sta_mlo_info.links[i].bssid,
 					      &mlo_si->links[i].data);
@@ -10865,6 +10817,73 @@ static int driver_nl80211_if_remove(void *priv, enum wpa_driver_if_type type,
 }
 
 
+#ifdef CONFIG_IEEE80211BE
+
+static int driver_nl80211_link_remove(void *priv, enum wpa_driver_if_type type,
+				      const char *ifname, u8 link_id)
+{
+	struct i802_bss *bss = priv;
+	struct wpa_driver_nl80211_data *drv = bss->drv;
+
+	if (type != WPA_IF_AP_BSS ||
+	    !nl80211_link_valid(bss->valid_links, link_id))
+		return -1;
+
+	wpa_printf(MSG_DEBUG,
+		   "nl80211: Teardown AP(%s) link %d (type=%d ifname=%s links=0x%x)",
+		   bss->ifname, link_id, type, ifname, bss->valid_links);
+
+	nl80211_remove_link(bss, link_id);
+
+	bss->ctx = bss->flink->ctx;
+
+	if (drv->first_bss == bss && !bss->valid_links)
+		drv->ctx = bss->ctx;
+
+	if (!bss->valid_links) {
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: No more links remaining, so remove interface");
+		return wpa_driver_nl80211_if_remove(bss, type, ifname);
+	}
+
+	return 0;
+}
+
+
+static bool nl80211_is_drv_shared(void *priv, void *bss_ctx)
+{
+	struct i802_bss *bss = priv;
+	struct wpa_driver_nl80211_data *drv = bss->drv;
+	unsigned int num_bss = 0;
+
+	/* If any other BSS exist, someone else is using this since at this
+	 * time, we would have removed all BSSs created by this driver and only
+	 * this BSS should be remaining if the driver is not shared by anyone.
+	 */
+	for (bss = drv->first_bss; bss; bss = bss->next) {
+		num_bss++;
+		if (num_bss > 1)
+			return true;
+	}
+
+	/* This is the only BSS present */
+	bss = priv;
+
+	/* If only one/no link is there no one is sharing */
+	if (bss->valid_links <= 1)
+		return false;
+
+	/* More than one link means someone is still using. To check if
+	 * only 1 bit is set, power of 2 condition can be checked. */
+	if (!(bss->valid_links & (bss->valid_links - 1)))
+		return false;
+
+	return true;
+}
+
+#endif /* CONFIG_IEEE80211BE */
+
+
 static int driver_nl80211_send_mlme(void *priv, const u8 *data,
 				    size_t data_len, int noack,
 				    unsigned int freq,
@@ -11133,10 +11152,7 @@ static int wpa_driver_nl80211_status(void *priv, char *buf, size_t buflen)
 			return pos - buf;
 		pos += res;
 
-		for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-			if (!(mlo->valid_links & BIT(i)))
-				continue;
-
+		for_each_link(mlo->valid_links, i) {
 			res = os_snprintf(pos, end - pos,
 					  "link_addr[%u]=" MACSTR "\n"
 					  "link_bssid[%u]=" MACSTR "\n"
@@ -12267,13 +12283,14 @@ static int wpa_driver_br_add_ip_neigh(void *priv, u8 version,
 				      const u8 *ipaddr, int prefixlen,
 				      const u8 *addr)
 {
-#ifdef CONFIG_LIBNL3_ROUTE
 	struct i802_bss *bss = priv;
 	struct wpa_driver_nl80211_data *drv = bss->drv;
-	struct rtnl_neigh *rn;
-	struct nl_addr *nl_ipaddr = NULL;
-	struct nl_addr *nl_lladdr = NULL;
-	int family, addrsize;
+	struct ndmsg nhdr = {
+		.ndm_state = NUD_PERMANENT,
+		.ndm_ifindex = bss->br_ifindex,
+	};
+	struct nl_msg *msg;
+	int addrsize;
 	int res;
 
 	if (!ipaddr || prefixlen == 0 || !addr)
@@ -12292,85 +12309,62 @@ static int wpa_driver_br_add_ip_neigh(void *priv, u8 version,
 	}
 
 	if (version == 4) {
-		family = AF_INET;
+		nhdr.ndm_family = AF_INET;
 		addrsize = 4;
 	} else if (version == 6) {
-		family = AF_INET6;
+		nhdr.ndm_family = AF_INET6;
 		addrsize = 16;
 	} else {
 		return -EINVAL;
 	}
 
-	rn = rtnl_neigh_alloc();
-	if (rn == NULL)
+	msg = nlmsg_alloc_simple(RTM_NEWNEIGH, NLM_F_CREATE);
+	if (!msg)
 		return -ENOMEM;
 
-	/* set the destination ip address for neigh */
-	nl_ipaddr = nl_addr_build(family, (void *) ipaddr, addrsize);
-	if (nl_ipaddr == NULL) {
-		wpa_printf(MSG_DEBUG, "nl80211: nl_ipaddr build failed");
-		res = -ENOMEM;
+	res = -ENOMEM;
+	if (nlmsg_append(msg, &nhdr, sizeof(nhdr), NLMSG_ALIGNTO) < 0 ||
+	    nla_put(msg, NDA_DST, addrsize, (void *) ipaddr) ||
+	    nla_put(msg, NDA_LLADDR, ETH_ALEN, (void *) addr))
 		goto errout;
-	}
-	nl_addr_set_prefixlen(nl_ipaddr, prefixlen);
-	res = rtnl_neigh_set_dst(rn, nl_ipaddr);
-	if (res) {
-		wpa_printf(MSG_DEBUG,
-			   "nl80211: neigh set destination addr failed");
+
+	res = nl_send_auto_complete(drv->rtnl_sk, msg);
+	if (res < 0)
 		goto errout;
-	}
 
-	/* set the corresponding lladdr for neigh */
-	nl_lladdr = nl_addr_build(AF_BRIDGE, (u8 *) addr, ETH_ALEN);
-	if (nl_lladdr == NULL) {
-		wpa_printf(MSG_DEBUG, "nl80211: neigh set lladdr failed");
-		res = -ENOMEM;
-		goto errout;
-	}
-	rtnl_neigh_set_lladdr(rn, nl_lladdr);
-
-	rtnl_neigh_set_ifindex(rn, bss->br_ifindex);
-	rtnl_neigh_set_state(rn, NUD_PERMANENT);
-
-	res = rtnl_neigh_add(drv->rtnl_sk, rn, NLM_F_CREATE);
+	res = nl_wait_for_ack(drv->rtnl_sk);
 	if (res) {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: Adding bridge ip neigh failed: %s",
 			   nl_geterror(res));
 	}
 errout:
-	if (nl_lladdr)
-		nl_addr_put(nl_lladdr);
-	if (nl_ipaddr)
-		nl_addr_put(nl_ipaddr);
-	if (rn)
-		rtnl_neigh_put(rn);
+	nlmsg_free(msg);
 	return res;
-#else /* CONFIG_LIBNL3_ROUTE */
-	return -1;
-#endif /* CONFIG_LIBNL3_ROUTE */
 }
 
 
 static int wpa_driver_br_delete_ip_neigh(void *priv, u8 version,
 					 const u8 *ipaddr)
 {
-#ifdef CONFIG_LIBNL3_ROUTE
 	struct i802_bss *bss = priv;
 	struct wpa_driver_nl80211_data *drv = bss->drv;
-	struct rtnl_neigh *rn;
-	struct nl_addr *nl_ipaddr;
-	int family, addrsize;
+	struct ndmsg nhdr = {
+		.ndm_state = NUD_PERMANENT,
+		.ndm_ifindex = bss->br_ifindex,
+	};
+	struct nl_msg *msg;
+	int addrsize;
 	int res;
 
 	if (!ipaddr)
 		return -EINVAL;
 
 	if (version == 4) {
-		family = AF_INET;
+		nhdr.ndm_family = AF_INET;
 		addrsize = 4;
 	} else if (version == 6) {
-		family = AF_INET6;
+		nhdr.ndm_family = AF_INET6;
 		addrsize = 16;
 	} else {
 		return -EINVAL;
@@ -12388,41 +12382,28 @@ static int wpa_driver_br_delete_ip_neigh(void *priv, u8 version,
 		return -1;
 	}
 
-	rn = rtnl_neigh_alloc();
-	if (rn == NULL)
+	msg = nlmsg_alloc_simple(RTM_DELNEIGH, NLM_F_CREATE);
+	if (!msg)
 		return -ENOMEM;
 
-	/* set the destination ip address for neigh */
-	nl_ipaddr = nl_addr_build(family, (void *) ipaddr, addrsize);
-	if (nl_ipaddr == NULL) {
-		wpa_printf(MSG_DEBUG, "nl80211: nl_ipaddr build failed");
-		res = -ENOMEM;
+	res = -ENOMEM;
+	if (nlmsg_append(msg, &nhdr, sizeof(nhdr), NLMSG_ALIGNTO) < 0 ||
+	    nla_put(msg, NDA_DST, addrsize, (void *) ipaddr))
 		goto errout;
-	}
-	res = rtnl_neigh_set_dst(rn, nl_ipaddr);
-	if (res) {
-		wpa_printf(MSG_DEBUG,
-			   "nl80211: neigh set destination addr failed");
+
+	res = nl_send_auto_complete(drv->rtnl_sk, msg);
+	if (res < 0)
 		goto errout;
-	}
 
-	rtnl_neigh_set_ifindex(rn, bss->br_ifindex);
-
-	res = rtnl_neigh_delete(drv->rtnl_sk, rn, 0);
+	res = nl_wait_for_ack(drv->rtnl_sk);
 	if (res) {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: Deleting bridge ip neigh failed: %s",
 			   nl_geterror(res));
 	}
 errout:
-	if (nl_ipaddr)
-		nl_addr_put(nl_ipaddr);
-	if (rn)
-		rtnl_neigh_put(rn);
+	nlmsg_free(msg);
 	return res;
-#else /* CONFIG_LIBNL3_ROUTE */
-	return -1;
-#endif /* CONFIG_LIBNL3_ROUTE */
 }
 
 
@@ -14303,12 +14284,12 @@ static int nl80211_set_td_policy(void *priv, u32 td_policy)
 }
 #endif /* CONFIG_DRIVER_NL80211_BRCM || CONFIG_DRIVER_NL80211_SYNA */
 
-static int nl80211_link_add(void *priv, u8 link_id, const u8 *addr)
+static int nl80211_link_add(void *priv, u8 link_id, const u8 *addr,
+			    void *bss_ctx)
 {
 	struct i802_bss *bss = priv;
 	struct wpa_driver_nl80211_data *drv = bss->drv;
 	struct nl_msg *msg;
-	unsigned int idx, i;
 	int ret;
 
 	wpa_printf(MSG_DEBUG, "nl80211: MLD: add link_id=%u, addr=" MACSTR,
@@ -14321,32 +14302,24 @@ static int nl80211_link_add(void *priv, u8 link_id, const u8 *addr)
 		return -EINVAL;
 	}
 
-	if (bss->n_links >= MAX_NUM_MLD_LINKS) {
-		wpa_printf(MSG_DEBUG, "nl80211: MLD: already have n_links=%zu",
-			   bss->n_links);
+	if (link_id >= MAX_NUM_MLD_LINKS) {
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: invalid link_id=%u", link_id);
 		return -EINVAL;
 	}
 
-	for (i = 0; i < bss->n_links; i++) {
-		if (bss->links[i].link_id == link_id &&
-		    bss->links[i].beacon_set) {
-			wpa_printf(MSG_DEBUG,
-				   "nl80211: MLD: link already set");
-			return -EINVAL;
-		}
+	if (bss->valid_links & BIT(link_id)) {
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: MLD: Link %u already set", link_id);
+		return -EINVAL;
 	}
 
-	/* try using the first link entry, assuming it is not beaconing yet */
-	if (bss->n_links == 1 &&
-	    bss->flink->link_id == NL80211_DRV_LINK_ID_NA) {
+	if (!bss->valid_links) {
+		/* Becoming MLD, verify we were not beaconing */
 		if (bss->flink->beacon_set) {
 			wpa_printf(MSG_DEBUG, "nl80211: BSS already beaconing");
 			return -EINVAL;
 		}
-
-		idx = 0;
-	} else {
-		idx = bss->n_links;
 	}
 
 	msg = nl80211_drv_msg(drv, 0, NL80211_CMD_ADD_LINK);
@@ -14364,14 +14337,49 @@ static int nl80211_link_add(void *priv, u8 link_id, const u8 *addr)
 		return ret;
 	}
 
-	bss->links[idx].link_id = link_id;
-	os_memcpy(bss->links[idx].addr, addr, ETH_ALEN);
+	os_memcpy(bss->links[link_id].addr, addr, ETH_ALEN);
 
-	bss->n_links = idx + 1;
+	/* The new link is the first one, make it the default */
+	if (!bss->valid_links)
+		bss->flink = &bss->links[link_id];
 
-	wpa_printf(MSG_DEBUG, "nl80211: MLD: n_links=%zu", bss->n_links);
+	bss->valid_links |= BIT(link_id);
+	bss->links[link_id].ctx = bss_ctx;
+
+	wpa_printf(MSG_DEBUG, "nl80211: MLD: valid_links=0x%04x",
+		   bss->valid_links);
 	return 0;
 }
+
+
+#ifdef CONFIG_IEEE80211BE
+static int wpa_driver_nl80211_link_sta_remove(void *priv, u8 link_id,
+					      const u8 *addr)
+{
+	struct i802_bss *bss = priv;
+	struct wpa_driver_nl80211_data *drv = bss->drv;
+	struct nl_msg *msg;
+	int ret;
+
+	if (!(bss->valid_links & BIT(link_id)))
+		return -ENOLINK;
+
+	if (!(msg = nl80211_bss_msg(bss, 0, NL80211_CMD_REMOVE_LINK_STA)) ||
+	    nla_put(msg, NL80211_ATTR_MLD_ADDR, ETH_ALEN, addr) ||
+	    nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id)) {
+		nlmsg_free(msg);
+		return -ENOBUFS;
+	}
+
+	ret = send_and_recv_cmd(drv, msg);
+	wpa_printf(MSG_DEBUG,
+		   "nl80211: link_sta_remove -> REMOVE_LINK_STA on link_id %u from MLD STA "
+		   MACSTR ", from %s --> %d (%s)",
+		   link_id, MAC2STR(addr), bss->ifname, ret, strerror(-ret));
+
+	return ret;
+}
+#endif /* CONFIG_IEEE80211BE */
 
 
 #ifdef CONFIG_TESTING_OPTIONS
@@ -14576,6 +14584,11 @@ const struct wpa_driver_ops wpa_driver_nl80211_ops = {
 #endif /* CONFIG_DPP */
 	.get_sta_mlo_info = nl80211_get_sta_mlo_info,
 	.link_add = nl80211_link_add,
+#ifdef CONFIG_IEEE80211BE
+	.link_remove = driver_nl80211_link_remove,
+	.is_drv_shared = nl80211_is_drv_shared,
+	.link_sta_remove = wpa_driver_nl80211_link_sta_remove,
+#endif /* CONFIG_IEEE80211BE */
 #ifdef CONFIG_TESTING_OPTIONS
 	.register_frame = testing_nl80211_register_frame,
 	.radio_disable = testing_nl80211_radio_disable,

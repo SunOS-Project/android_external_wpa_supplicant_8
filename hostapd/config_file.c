@@ -1678,6 +1678,8 @@ static int parse_anqp_elem(struct hostapd_bss_config *bss, char *buf, int line)
 	return 0;
 }
 
+#endif /* CONFIG_INTERWORKING */
+
 
 static int parse_qos_map_set(struct hostapd_bss_config *bss,
 			     char *buf, int line)
@@ -1718,8 +1720,6 @@ static int parse_qos_map_set(struct hostapd_bss_config *bss,
 
 	return 0;
 }
-
-#endif /* CONFIG_INTERWORKING */
 
 
 #ifdef CONFIG_HS20
@@ -2869,6 +2869,37 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		os_free(bss->radius->auth_server->shared_secret);
 		bss->radius->auth_server->shared_secret = (u8 *) os_strdup(pos);
 		bss->radius->auth_server->shared_secret_len = len;
+	} else if (bss->radius->auth_server &&
+		   os_strcmp(buf, "auth_server_type") == 0) {
+		if (os_strcmp(pos, "UDP") == 0) {
+			bss->radius->auth_server->tls = false;
+#ifdef CONFIG_RADIUS_TLS
+		} else if (os_strcmp(pos, "TLS") == 0) {
+			bss->radius->auth_server->tls = true;
+#endif /* CONFIG_RADIUS_TLS */
+		} else {
+			wpa_printf(MSG_ERROR, "Line %d: unsupported RADIUS type '%s'",
+				   line, pos);
+			return 1;
+		}
+#ifdef CONFIG_RADIUS_TLS
+	} else if (bss->radius->auth_server &&
+		   os_strcmp(buf, "auth_server_ca_cert") == 0) {
+		os_free(bss->radius->auth_server->ca_cert);
+		bss->radius->auth_server->ca_cert = os_strdup(pos);
+	} else if (bss->radius->auth_server &&
+		   os_strcmp(buf, "auth_server_client_cert") == 0) {
+		os_free(bss->radius->auth_server->client_cert);
+		bss->radius->auth_server->client_cert = os_strdup(pos);
+	} else if (bss->radius->auth_server &&
+		   os_strcmp(buf, "auth_server_private_key") == 0) {
+		os_free(bss->radius->auth_server->private_key);
+		bss->radius->auth_server->private_key = os_strdup(pos);
+	} else if (bss->radius->auth_server &&
+		   os_strcmp(buf, "auth_server_private_key_passwd") == 0) {
+		os_free(bss->radius->auth_server->private_key_passwd);
+		bss->radius->auth_server->private_key_passwd = os_strdup(pos);
+#endif /* CONFIG_RADIUS_TLS */
 	} else if (os_strcmp(buf, "acct_server_addr") == 0) {
 		if (hostapd_config_read_radius_addr(
 			    &bss->radius->acct_servers,
@@ -2903,6 +2934,37 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		os_free(bss->radius->acct_server->shared_secret);
 		bss->radius->acct_server->shared_secret = (u8 *) os_strdup(pos);
 		bss->radius->acct_server->shared_secret_len = len;
+	} else if (bss->radius->acct_server &&
+		   os_strcmp(buf, "acct_server_type") == 0) {
+		if (os_strcmp(pos, "UDP") == 0) {
+			bss->radius->acct_server->tls = false;
+#ifdef CONFIG_RADIUS_TLS
+		} else if (os_strcmp(pos, "TLS") == 0) {
+			bss->radius->acct_server->tls = true;
+#endif /* CONFIG_RADIUS_TLS */
+		} else {
+			wpa_printf(MSG_ERROR, "Line %d: unsupported RADIUS type '%s'",
+				   line, pos);
+			return 1;
+		}
+#ifdef CONFIG_RADIUS_TLS
+	} else if (bss->radius->acct_server &&
+		   os_strcmp(buf, "acct_server_ca_cert") == 0) {
+		os_free(bss->radius->acct_server->ca_cert);
+		bss->radius->acct_server->ca_cert = os_strdup(pos);
+	} else if (bss->radius->acct_server &&
+		   os_strcmp(buf, "acct_server_client_cert") == 0) {
+		os_free(bss->radius->acct_server->client_cert);
+		bss->radius->acct_server->client_cert = os_strdup(pos);
+	} else if (bss->radius->acct_server &&
+		   os_strcmp(buf, "acct_server_private_key") == 0) {
+		os_free(bss->radius->acct_server->private_key);
+		bss->radius->acct_server->private_key = os_strdup(pos);
+	} else if (bss->radius->acct_server &&
+		   os_strcmp(buf, "acct_server_private_key_passwd") == 0) {
+		os_free(bss->radius->acct_server->private_key_passwd);
+		bss->radius->acct_server->private_key_passwd = os_strdup(pos);
+#endif /* CONFIG_RADIUS_TLS */
 	} else if (os_strcmp(buf, "radius_retry_primary_interval") == 0) {
 		bss->radius->retry_primary_interval = atoi(pos);
 	} else if (os_strcmp(buf, "radius_acct_interim_interval") == 0) {
@@ -4198,10 +4260,10 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		bss->gas_frag_limit = val;
 	} else if (os_strcmp(buf, "gas_comeback_delay") == 0) {
 		bss->gas_comeback_delay = atoi(pos);
+#endif /* CONFIG_INTERWORKING */
 	} else if (os_strcmp(buf, "qos_map_set") == 0) {
 		if (parse_qos_map_set(bss, pos, line) < 0)
 			return 1;
-#endif /* CONFIG_INTERWORKING */
 #ifdef CONFIG_RADIUS_TEST
 	} else if (os_strcmp(buf, "dump_msk_file") == 0) {
 		os_free(bss->dump_msk_file);
@@ -4606,6 +4668,10 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 				WLAN_RRM_CAPS_BEACON_REPORT_PASSIVE |
 				WLAN_RRM_CAPS_BEACON_REPORT_ACTIVE |
 				WLAN_RRM_CAPS_BEACON_REPORT_TABLE;
+	} else if (os_strcmp(buf, "rrm_link_measurement_report") == 0) {
+		if (atoi(pos))
+			bss->radio_measurements[0] |=
+				WLAN_RRM_CAPS_LINK_MEASUREMENT;
 	} else if (os_strcmp(buf, "gas_address3") == 0) {
 		bss->gas_address3 = atoi(pos);
 	} else if (os_strcmp(buf, "stationary_ap") == 0) {
@@ -4746,6 +4812,36 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		}
 
 		bss->multi_ap = val;
+	} else if (os_strcmp(buf, "multi_ap_profile") == 0) {
+		int val = atoi(pos);
+
+		if (val < MULTI_AP_PROFILE_1 || val > MULTI_AP_PROFILE_MAX) {
+			wpa_printf(MSG_ERROR,
+				   "Line %d: Invalid multi_ap_profile '%s'",
+				   line, buf);
+			return -1;
+		}
+		bss->multi_ap_profile = val;
+	} else if (os_strcmp(buf, "multi_ap_client_disallow") == 0) {
+		int val = atoi(pos);
+
+		if (val < 0 || val > 3) {
+			wpa_printf(MSG_ERROR,
+				   "Line %d: Invalid multi_ap_client_allow '%s'",
+				   line, buf);
+			return -1;
+		}
+		bss->multi_ap_client_disallow = val;
+	} else if (os_strcmp(buf, "multi_ap_vlanid") == 0) {
+		int val = atoi(pos);
+
+		if (val < 0 || val > MAX_VLAN_ID) {
+			wpa_printf(MSG_ERROR,
+				   "Line %d: Invalid multi_ap_vlan_id '%s'",
+				   line, buf);
+			return -1;
+		}
+		bss->multi_ap_vlanid = val;
 	} else if (os_strcmp(buf, "rssi_reject_assoc_rssi") == 0) {
 		conf->rssi_reject_assoc_rssi = atoi(pos);
 	} else if (os_strcmp(buf, "rssi_reject_assoc_timeout") == 0) {
@@ -4962,8 +5058,6 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		conf->punct_acs_threshold = val;
 	} else if (os_strcmp(buf, "mld_ap") == 0) {
 		bss->mld_ap = !!atoi(pos);
-	} else if (os_strcmp(buf, "mld_id") == 0) {
-		bss->mld_id = atoi(pos);
 	} else if (os_strcmp(buf, "mld_addr") == 0) {
 		if (hwaddr_aton(pos, bss->mld_addr)) {
 			wpa_printf(MSG_ERROR, "Line %d: Invalid mld_addr",

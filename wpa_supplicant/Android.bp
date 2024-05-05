@@ -333,6 +333,7 @@ filegroup {
         "src/common/sae.c",
         "src/common/sae_pk.c",
         "src/common/wpa_common.c",
+        "src/common/ptksa_cache.c",
         "src/crypto/aes-ctr.c",
         "src/crypto/aes-encblock.c",
         "src/crypto/aes-siv.c",

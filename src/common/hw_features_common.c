@@ -381,6 +381,75 @@ int check_40mhz_2g4(struct hostapd_hw_modes *mode,
 }
 
 
+static void punct_update_legacy_bw_80(u8 bitmap, u8 pri_chan, u8 *seg0)
+{
+	u8 first_chan = *seg0 - 6, sec_chan;
+
+	switch (bitmap) {
+	case 0x6:
+		*seg0 = 0;
+		return;
+	case 0x8:
+	case 0x4:
+	case 0x2:
+	case 0x1:
+	case 0xC:
+	case 0x3:
+		if (pri_chan < *seg0)
+			*seg0 -= 4;
+		else
+			*seg0 += 4;
+		break;
+	}
+
+	if (pri_chan < *seg0)
+		sec_chan = pri_chan + 4;
+	else
+		sec_chan = pri_chan - 4;
+
+	if (bitmap & BIT((sec_chan - first_chan) / 4))
+		*seg0 = 0;
+}
+
+
+static void punct_update_legacy_bw_160(u8 bitmap, u8 pri,
+				       enum oper_chan_width *width, u8 *seg0)
+{
+	if (pri < *seg0) {
+		*seg0 -= 8;
+		if (bitmap & 0x0F) {
+			*width = 0;
+			punct_update_legacy_bw_80(bitmap & 0xF, pri, seg0);
+		}
+	} else {
+		*seg0 += 8;
+		if (bitmap & 0xF0) {
+			*width = 0;
+			punct_update_legacy_bw_80((bitmap & 0xF0) >> 4, pri,
+						  seg0);
+		}
+	}
+}
+
+
+void punct_update_legacy_bw(u16 bitmap, u8 pri, enum oper_chan_width *width,
+			    u8 *seg0, u8 *seg1)
+{
+	if (*width == CONF_OPER_CHWIDTH_80MHZ && (bitmap & 0xF)) {
+		*width = CONF_OPER_CHWIDTH_USE_HT;
+		punct_update_legacy_bw_80(bitmap & 0xF, pri, seg0);
+	}
+
+	if (*width == CONF_OPER_CHWIDTH_160MHZ && (bitmap & 0xFF)) {
+		*width = CONF_OPER_CHWIDTH_80MHZ;
+		*seg1 = 0;
+		punct_update_legacy_bw_160(bitmap & 0xFF, pri, width, seg0);
+	}
+
+	/* TODO: 320 MHz */
+}
+
+
 int hostapd_set_freq_params(struct hostapd_freq_params *data,
 			    enum hostapd_hw_mode mode,
 			    int freq, int channel, int enable_edmg,
@@ -391,8 +460,12 @@ int hostapd_set_freq_params(struct hostapd_freq_params *data,
 			    int center_segment0,
 			    int center_segment1, u32 vht_caps,
 			    struct he_capabilities *he_cap,
-			    struct eht_capabilities *eht_cap)
+			    struct eht_capabilities *eht_cap,
+			    u16 punct_bitmap)
 {
+	enum oper_chan_width oper_chwidth_legacy;
+	u8 seg0_legacy, seg1_legacy;
+
 	if (!he_cap || !he_cap->he_supported)
 		he_enabled = 0;
 	if (!eht_cap || !eht_cap->eht_supported)
@@ -578,6 +651,14 @@ int hostapd_set_freq_params(struct hostapd_freq_params *data,
 		break;
 	}
 
+	oper_chwidth_legacy = oper_chwidth;
+	seg0_legacy = center_segment0;
+	seg1_legacy = center_segment1;
+	if (punct_bitmap)
+		punct_update_legacy_bw(punct_bitmap, channel,
+				       &oper_chwidth_legacy,
+				       &seg0_legacy, &seg1_legacy);
+
 	if (data->eht_enabled || data->he_enabled ||
 	    data->vht_enabled) switch (oper_chwidth) {
 	case CONF_OPER_CHWIDTH_USE_HT:
@@ -602,7 +683,8 @@ int hostapd_set_freq_params(struct hostapd_freq_params *data,
 		/* fall through */
 	case CONF_OPER_CHWIDTH_80MHZ:
 		data->bandwidth = 80;
-		if (!sec_channel_offset) {
+		if (!sec_channel_offset &&
+		    oper_chwidth_legacy != CONF_OPER_CHWIDTH_USE_HT) {
 			wpa_printf(MSG_ERROR,
 				   "80/80+80 MHz: no second channel offset");
 			return -1;
@@ -660,7 +742,8 @@ int hostapd_set_freq_params(struct hostapd_freq_params *data,
 				   "160 MHz: center segment 1 should not be set");
 			return -1;
 		}
-		if (!sec_channel_offset) {
+		if (!sec_channel_offset &&
+		    oper_chwidth_legacy != CONF_OPER_CHWIDTH_USE_HT) {
 			wpa_printf(MSG_ERROR,
 				   "160 MHz: second channel offset not set");
 			return -1;

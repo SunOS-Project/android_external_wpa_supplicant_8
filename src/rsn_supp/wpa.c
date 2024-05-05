@@ -801,8 +801,8 @@ static size_t wpa_mlo_link_kde_len(struct wpa_sm *sm)
 	int i;
 	unsigned int num_links = 0;
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (sm->mlo.assoc_link_id != i && (sm->mlo.req_links & BIT(i)))
+	for_each_link(sm->mlo.req_links, i) {
+		if (sm->mlo.assoc_link_id != i)
 			num_links++;
 	}
 
@@ -815,8 +815,8 @@ static u8 * wpa_mlo_link_kde(struct wpa_sm *sm, u8 *pos)
 	int i;
 	u8 hdr[1 + ETH_ALEN];
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (sm->mlo.assoc_link_id == i || !(sm->mlo.req_links & BIT(i)))
+	for_each_link(sm->mlo.req_links, i) {
+		if (sm->mlo.assoc_link_id == i)
 			continue;
 
 		wpa_printf(MSG_DEBUG,
@@ -1561,10 +1561,7 @@ static int wpa_supplicant_pairwise_mlo_gtk(struct wpa_sm *sm,
 {
 	u8 i;
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (!(sm->mlo.valid_links & BIT(i)))
-			continue;
-
+	for_each_link(sm->mlo.valid_links, i) {
 		if (!ie->mlo_gtk[i]) {
 			wpa_msg(sm->ctx->msg_ctx, MSG_ERROR,
 				"MLO RSN: GTK not found for link ID %u", i);
@@ -1913,10 +1910,7 @@ static int mlo_ieee80211w_set_keys(struct wpa_sm *sm,
 	    sm->mgmt_group_cipher == WPA_CIPHER_GTK_NOT_USED)
 		return 0;
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (!(sm->mlo.valid_links & BIT(i)))
-			continue;
-
+	for_each_link(sm->mlo.valid_links, i) {
 		if (_mlo_ieee80211w_set_keys(sm, i, ie))
 			return -1;
 	}
@@ -2942,10 +2936,7 @@ static void wpa_supplicant_process_mlo_1_of_2(struct wpa_sm *sm,
 		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
 			"MLO RSN: Failed to configure MLO IGTK");
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (!(sm->mlo.valid_links & BIT(i)))
-			continue;
-
+	for_each_link(sm->mlo.valid_links, i) {
 		/*
 		 * AP may send group keys for subset of the all links during
 		 * rekey

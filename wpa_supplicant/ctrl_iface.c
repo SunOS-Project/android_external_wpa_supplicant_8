@@ -902,9 +902,20 @@ static int wpa_supplicant_ctrl_iface_set(struct wpa_supplicant *wpa_s,
 			wpa_config_process_global(wpa_s->conf, cmd, -1);
 		}
 	} else if (os_strcasecmp(cmd, "mbo_cell_capa") == 0) {
-		wpas_mbo_update_cell_capa(wpa_s, atoi(value));
+		int val = atoi(value);
+
+		if (val < MBO_CELL_CAPA_AVAILABLE ||
+		    val > MBO_CELL_CAPA_NOT_SUPPORTED)
+			return -1;
+
+		wpas_mbo_update_cell_capa(wpa_s, val);
 	} else if (os_strcasecmp(cmd, "oce") == 0) {
-		wpa_s->conf->oce = atoi(value);
+		int val = atoi(value);
+
+		if (val < 0 || val > 3)
+			return -1;
+
+		wpa_s->conf->oce = val;
 		if (wpa_s->conf->oce) {
 			if ((wpa_s->conf->oce & OCE_STA) &&
 			    (wpa_s->drv_flags & WPA_DRIVER_FLAGS_OCE_STA))
@@ -8949,6 +8960,8 @@ static void wpa_supplicant_ctrl_iface_flush(struct wpa_supplicant *wpa_s)
 
 	wpa_s->next_ssid = NULL;
 
+	wnm_btm_reset(wpa_s);
+
 #ifdef CONFIG_INTERWORKING
 #ifdef CONFIG_HS20
 	hs20_cancel_fetch_osu(wpa_s);
@@ -12112,10 +12125,7 @@ static int wpas_ctrl_iface_mlo_signal_poll(struct wpa_supplicant *wpa_s,
 	pos = buf;
 	end = buf + buflen;
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (!(mlo_si.valid_links & BIT(i)))
-			continue;
-
+	for_each_link(mlo_si.valid_links, i) {
 		ret = os_snprintf(pos, end - pos,
 				  "LINK_ID=%d\nRSSI=%d\nLINKSPEED=%lu\n"
 				  "NOISE=%d\nFREQUENCY=%u\n",
@@ -12187,10 +12197,7 @@ static int wpas_ctrl_iface_mlo_status(struct wpa_supplicant *wpa_s,
 	pos = buf;
 	end = buf + buflen;
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (!(wpa_s->valid_links & BIT(i)))
-			continue;
-
+	for_each_link(wpa_s->valid_links, i) {
 		ret = os_snprintf(pos, end - pos, "link_id=%d\nfreq=%u\n"
 				  "ap_link_addr=" MACSTR
 				  "\nsta_link_addr=" MACSTR "\n",

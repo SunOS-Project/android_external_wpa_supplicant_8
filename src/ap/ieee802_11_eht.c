@@ -206,18 +206,10 @@ u8 * hostapd_eid_eht_operation(struct hostapd_data *hapd, u8 *eid)
 	enum oper_chan_width chwidth;
 	size_t elen = 1 + 4;
 	bool eht_oper_info_present;
-	u16 punct_bitmap = conf->punct_bitmap;
+	u16 punct_bitmap = hostapd_get_punct_bitmap(hapd);
 
 	if (!hapd->iface->current_mode)
 		return eid;
-
-#ifdef CONFIG_TESTING_OPTIONS
-	if (!punct_bitmap && hapd->conf->eht_oper_puncturing_override) {
-		wpa_printf(MSG_DEBUG, "EHT: Puncturing mask override=0x%x",
-			   hapd->conf->eht_oper_puncturing_override);
-		punct_bitmap = hapd->conf->eht_oper_puncturing_override;
-	}
-#endif /* CONFIG_TESTING_OPTIONS */
 
 	if (is_6ghz_op_class(conf->op_class))
 		chwidth = op_class_to_ch_width(conf->op_class);
@@ -458,6 +450,8 @@ static u8 * hostapd_eid_eht_basic_ml_common(struct hostapd_data *hapd,
 	size_t len, slice_len;
 	u8 link_id;
 	u8 common_info_len;
+	u16 mld_cap;
+	u8 max_simul_links, active_links;
 
 	/*
 	 * As the Multi-Link element can exceed the size of 255 bytes need to
@@ -495,7 +489,7 @@ static u8 * hostapd_eid_eht_basic_ml_common(struct hostapd_data *hapd,
 	wpabuf_put_u8(buf, common_info_len);
 
 	/* Own MLD MAC Address */
-	wpabuf_put_data(buf, hapd->mld_addr, ETH_ALEN);
+	wpabuf_put_data(buf, hapd->mld->mld_addr, ETH_ALEN);
 
 	/* Own Link ID */
 	wpabuf_put_u8(buf, hapd->mld_link_id);
@@ -507,14 +501,31 @@ static u8 * hostapd_eid_eht_basic_ml_common(struct hostapd_data *hapd,
 		   hapd->iface->mld_eml_capa);
 	wpabuf_put_le16(buf, hapd->iface->mld_eml_capa);
 
+	mld_cap = hapd->iface->mld_mld_capa;
+	max_simul_links = mld_cap & EHT_ML_MLD_CAPA_MAX_NUM_SIM_LINKS_MASK;
+	active_links = hapd->mld->num_links - 1;
+
+	if (active_links > max_simul_links) {
+		wpa_printf(MSG_ERROR,
+			   "MLD: Error in max simultaneous links, advertised: 0x%x current: 0x%x",
+			   max_simul_links, active_links);
+		active_links = max_simul_links;
+	}
+
+	mld_cap &= ~EHT_ML_MLD_CAPA_MAX_NUM_SIM_LINKS_MASK;
+	mld_cap |= active_links & EHT_ML_MLD_CAPA_MAX_NUM_SIM_LINKS_MASK;
+
+	/* TODO: Advertise T2LM based on driver support as well */
+	mld_cap &= ~EHT_ML_MLD_CAPA_TID_TO_LINK_MAP_NEG_SUPP_MSK;
+
 	wpa_printf(MSG_DEBUG, "MLD: MLD Capabilities and Operations=0x%x",
-		   hapd->iface->mld_mld_capa);
-	wpabuf_put_le16(buf, hapd->iface->mld_mld_capa);
+		   mld_cap);
+	wpabuf_put_le16(buf, mld_cap);
 
 	if (include_mld_id) {
 		wpa_printf(MSG_DEBUG, "MLD: AP MLD ID=0x%x",
-			   hapd->conf->mld_id);
-		wpabuf_put_u8(buf, hapd->conf->mld_id);
+			   hostapd_get_mld_id(hapd));
+		wpabuf_put_u8(buf, hostapd_get_mld_id(hapd));
 	}
 
 	if (!mld_info)
@@ -578,7 +589,8 @@ static u8 * hostapd_eid_eht_basic_ml_common(struct hostapd_data *hapd,
 		wpabuf_put_le64(buf, 0);
 
 		/* DTIM Info */
-		wpabuf_put_le16(buf, link_bss->conf->dtim_period);
+		wpabuf_put_u8(buf, 0); /* DTIM Count */
+		wpabuf_put_u8(buf, link_bss->conf->dtim_period);
 
 		/* BSS Parameters Change Count */
 		wpabuf_put_u8(buf, hapd->eht_mld_bss_param_change);
@@ -812,7 +824,7 @@ struct wpabuf * hostapd_ml_auth_resp(struct hostapd_data *hapd)
 	wpabuf_put_u8(buf, WLAN_EID_EXT_MULTI_LINK);
 	wpabuf_put_le16(buf, MULTI_LINK_CONTROL_TYPE_BASIC);
 	wpabuf_put_u8(buf, ETH_ALEN + 1);
-	wpabuf_put_data(buf, hapd->mld_addr, ETH_ALEN);
+	wpabuf_put_data(buf, hapd->mld->mld_addr, ETH_ALEN);
 
 	return buf;
 }
@@ -1047,8 +1059,7 @@ static int hostapd_mld_validate_assoc_info(struct hostapd_data *hapd,
 			if (hapd == other_hapd)
 				continue;
 
-			if (other_hapd->conf->mld_ap &&
-			    other_hapd->conf->mld_id == hapd->conf->mld_id &&
+			if (hostapd_is_ml_partner(hapd, other_hapd) &&
 			    link_id == other_hapd->mld_link_id)
 				break;
 		}

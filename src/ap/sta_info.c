@@ -187,6 +187,19 @@ void ap_free_sta_pasn(struct hostapd_data *hapd, struct sta_info *sta)
 
 #endif /* CONFIG_PASN */
 
+
+static void __ap_free_sta(struct hostapd_data *hapd, struct sta_info *sta)
+{
+#ifdef CONFIG_IEEE80211BE
+	if (hostapd_sta_is_link_sta(hapd, sta) &&
+	    !hostapd_drv_link_sta_remove(hapd, sta->addr))
+		return;
+#endif /* CONFIG_IEEE80211BE */
+
+	hostapd_drv_sta_remove(hapd, sta->addr);
+}
+
+
 void ap_free_sta(struct hostapd_data *hapd, struct sta_info *sta)
 {
 	int set_beacon = 0;
@@ -209,7 +222,7 @@ void ap_free_sta(struct hostapd_data *hapd, struct sta_info *sta)
 
 	if (!hapd->iface->driver_ap_teardown &&
 	    !(sta->flags & WLAN_STA_PREAUTH)) {
-		hostapd_drv_sta_remove(hapd, sta->addr);
+		__ap_free_sta(hapd, sta);
 		sta->added_unassoc = 0;
 	}
 
@@ -452,6 +465,27 @@ void hostapd_free_stas(struct hostapd_data *hapd)
 		ap_free_sta(hapd, prev);
 	}
 }
+
+
+#ifdef CONFIG_IEEE80211BE
+void hostapd_free_link_stas(struct hostapd_data *hapd)
+{
+	struct sta_info *sta, *prev;
+
+	sta = hapd->sta_list;
+	while (sta) {
+		prev = sta;
+		sta = sta->next;
+
+		if (!hostapd_sta_is_link_sta(hapd, prev))
+			continue;
+
+		wpa_printf(MSG_DEBUG, "Removing link station from MLD " MACSTR,
+			   MAC2STR(prev->addr));
+		ap_free_sta(hapd, prev);
+	}
+}
+#endif /* CONFIG_IEEE80211BE */
 
 
 /**
@@ -970,16 +1004,15 @@ static bool ap_sta_ml_disconnect(struct hostapd_data *hapd,
 	interfaces = assoc_hapd->iface->interfaces;
 
 	for (link_id = 0; link_id < MAX_NUM_MLD_LINKS; link_id++) {
+		if (!assoc_sta->mld_info.links[link_id].valid)
+			continue;
+
 		for (i = 0; i < interfaces->count; i++) {
 			struct sta_info *tmp_sta;
 
-			if (!assoc_sta->mld_info.links[link_id].valid)
-				continue;
-
 			tmp_hapd = interfaces->iface[i]->bss[0];
 
-			if (!tmp_hapd->conf->mld_ap ||
-			    assoc_hapd->conf->mld_id != tmp_hapd->conf->mld_id)
+			if (!hostapd_is_ml_partner(tmp_hapd, assoc_hapd))
 				continue;
 
 			for (tmp_sta = tmp_hapd->sta_list; tmp_sta;
@@ -1433,7 +1466,7 @@ void ap_sta_set_authorized_event(struct hostapd_data *hapd,
 	u8 addr[ETH_ALEN];
 	u8 ip_addr_buf[4];
 #endif /* CONFIG_P2P */
-	u8 *ip_ptr = NULL;
+	const u8 *ip_ptr = NULL;
 
 #ifdef CONFIG_P2P
 	if (hapd->p2p_group == NULL) {
@@ -1731,7 +1764,7 @@ static void ap_sta_remove_link_sta(struct hostapd_data *hapd,
 	unsigned int i, j;
 
 	for_each_mld_link(tmp_hapd, i, j, hapd->iface->interfaces,
-			  hapd->conf->mld_id) {
+			  hostapd_get_mld_id(hapd)) {
 		struct sta_info *tmp_sta;
 
 		if (hapd == tmp_hapd)

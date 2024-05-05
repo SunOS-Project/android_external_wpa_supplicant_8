@@ -44,6 +44,7 @@ struct mesh_conf;
 #endif /* CONFIG_CTRL_IFACE_UDP */
 
 struct hostapd_iface;
+struct hostapd_mld;
 
 struct hapd_interfaces {
 	int (*reload_config)(struct hostapd_iface *iface);
@@ -96,6 +97,10 @@ struct hapd_interfaces {
        unsigned char ctrl_iface_cookie[CTRL_IFACE_COOKIE_LEN];
 #endif /* CONFIG_CTRL_IFACE_UDP */
 
+#ifdef CONFIG_IEEE80211BE
+	struct hostapd_mld **mld;
+	size_t mld_count;
+#endif /* CONFIG_IEEE80211BE */
 };
 
 enum hostapd_chan_status {
@@ -178,12 +183,6 @@ struct hostapd_data {
 	unsigned int reenable_beacon:1;
 
 	u8 own_addr[ETH_ALEN];
-	u8 mld_addr[ETH_ALEN];
-	u8 mld_link_id;
-	/* Used for mld_link_id assignment - valid on the first MLD BSS only */
-	u8 mld_next_link_id;
-
-	struct hostapd_data *mld_first_bss;
 
 	int num_sta; /* number of entries in sta_list */
 	struct sta_info *sta_list; /* STA info list head */
@@ -409,8 +408,10 @@ struct hostapd_data {
 	u8 beacon_req_token;
 	u8 lci_req_token;
 	u8 range_req_token;
+	u8 link_measurement_req_token;
 	unsigned int lci_req_active:1;
 	unsigned int range_req_active:1;
+	unsigned int link_mesr_req_active:1;
 
 	int dhcp_sock; /* UDP socket used with the DHCP server */
 
@@ -475,6 +476,9 @@ struct hostapd_data {
 
 #ifdef CONFIG_IEEE80211BE
 	u8 eht_mld_bss_param_change;
+	struct hostapd_mld *mld;
+	struct dl_list link;
+	u8 mld_link_id;
 #ifdef CONFIG_TESTING_OPTIONS
 	u8 eht_mld_link_removal_count;
 #endif /* CONFIG_TESTING_OPTIONS */
@@ -483,6 +487,9 @@ struct hostapd_data {
 #ifdef CONFIG_NAN_USD
 	struct nan_de *nan_de;
 #endif /* CONFIG_NAN_USD */
+
+	u64 scan_cookie; /* Scan instance identifier for the ongoing HT40 scan
+			  */
 };
 
 
@@ -506,6 +513,29 @@ enum hostapd_iface_state {
 	HAPD_IFACE_NO_IR,
 	HAPD_IFACE_ENABLED
 };
+
+#ifdef CONFIG_IEEE80211BE
+/**
+ * struct hostapd_mld - hostapd per-mld data structure
+ */
+struct hostapd_mld {
+	char name[IFNAMSIZ + 1];
+	u8 mld_addr[ETH_ALEN];
+	u8 next_link_id;
+	u8 num_links;
+	/* Number of hostapd_data (hapd) referencing this. num_links cannot be
+	 * used since num_links can go to 0 even when a BSS is disabled and
+	 * when it is re-enabled, the MLD should exist and hence it cannot be
+	 * freed when num_links is 0.
+	 */
+	u8 refcount;
+
+	struct hostapd_data *fbss;
+	struct dl_list links; /* List head of all affiliated links */
+};
+
+#define HOSTAPD_MLD_MAX_REF_COUNT      0xFF
+#endif /* CONFIG_IEEE80211BE */
 
 /**
  * struct hostapd_iface - hostapd per-interface data structure
@@ -554,6 +584,7 @@ struct hostapd_iface {
 
 	u64 drv_flags;
 	u64 drv_flags2;
+	unsigned int drv_rrm_flags;
 
 	/*
 	 * A bitmap of supported protocols for probe response offload. See
@@ -578,6 +609,8 @@ struct hostapd_iface {
 	struct hostapd_rate_data *current_rates;
 	int *basic_rates;
 	int freq;
+
+	bool radar_detected;
 
 	/* Background radar configuration */
 	struct {
@@ -680,6 +713,8 @@ struct hostapd_iface {
 
 	/* Configured freq of interface is NO_IR */
 	bool is_no_ir;
+
+	bool is_ch_switch_dfs; /* Channel switch from ACS to DFS */
 };
 
 /* hostapd.c */
@@ -786,8 +821,17 @@ int hostapd_mbssid_get_bss_index(struct hostapd_data *hapd);
 struct hostapd_data * hostapd_mld_get_link_bss(struct hostapd_data *hapd,
 					       u8 link_id);
 int hostapd_link_remove(struct hostapd_data *hapd, u32 count);
+bool hostapd_is_ml_partner(struct hostapd_data *hapd1,
+			   struct hostapd_data *hapd2);
+u8 hostapd_get_mld_id(struct hostapd_data *hapd);
+int hostapd_mld_add_link(struct hostapd_data *hapd);
+int hostapd_mld_remove_link(struct hostapd_data *hapd);
+struct hostapd_data * hostapd_mld_get_first_bss(struct hostapd_data *hapd);
 
 #ifdef CONFIG_IEEE80211BE
+
+bool hostapd_mld_is_first_bss(struct hostapd_data *hapd);
+
 #define for_each_mld_link(_link, _bss_idx, _iface_idx, _ifaces, _mld_id) \
 	for (_iface_idx = 0;						\
 	     _iface_idx < (_ifaces)->count;				\
@@ -799,11 +843,21 @@ int hostapd_link_remove(struct hostapd_data *hapd, u32 count);
 			for (_link =					\
 			     (_ifaces)->iface[_iface_idx]->bss[_bss_idx]; \
 			    _link && _link->conf->mld_ap &&		\
-				_link->conf->mld_id == _mld_id;		\
+				hostapd_get_mld_id(_link) == _mld_id;	\
 			    _link = NULL)
+
 #else /* CONFIG_IEEE80211BE */
+
+static inline bool hostapd_mld_is_first_bss(struct hostapd_data *hapd)
+{
+	return true;
+}
+
 #define for_each_mld_link(_link, _bss_idx, _iface_idx, _ifaces, _mld_id) \
 	if (false)
+
 #endif /* CONFIG_IEEE80211BE */
+
+u16 hostapd_get_punct_bitmap(struct hostapd_data *hapd);
 
 #endif /* HOSTAPD_H */

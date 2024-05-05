@@ -121,7 +121,7 @@ void ieee802_11_send_sa_query_req(struct hostapd_data *hapd,
 
 #ifdef CONFIG_IEEE80211BE
 	if (ap_sta_is_mld(hapd, sta))
-		own_addr = hapd->mld_addr;
+		own_addr = hapd->mld->mld_addr;
 #endif /* CONFIG_IEEE80211BE */
 
 	mgmt->frame_control = IEEE80211_FC(WLAN_FC_TYPE_MGMT,
@@ -219,7 +219,7 @@ static void ieee802_11_send_sa_query_resp(struct hostapd_data *hapd,
 
 #ifdef CONFIG_IEEE80211BE
 	if (ap_sta_is_mld(hapd, sta))
-		own_addr = hapd->mld_addr;
+		own_addr = hapd->mld->mld_addr;
 #endif /* CONFIG_IEEE80211BE */
 
 	resp->frame_control = IEEE80211_FC(WLAN_FC_TYPE_MGMT,
@@ -1148,13 +1148,11 @@ u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len)
 u16 check_ext_capab(struct hostapd_data *hapd, struct sta_info *sta,
 		    const u8 *ext_capab_ie, size_t ext_capab_ie_len)
 {
-#ifdef CONFIG_INTERWORKING
 	/* check for QoS Map support */
 	if (ext_capab_ie_len >= 5) {
 		if (ext_capab_ie[4] & 0x01)
 			sta->qos_map_enabled = 1;
 	}
-#endif /* CONFIG_INTERWORKING */
 
 	if (ext_capab_ie_len > 0) {
 		sta->ecsa_supported = !!(ext_capab_ie[0] & BIT(2));

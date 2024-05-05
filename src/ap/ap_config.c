@@ -163,6 +163,8 @@ void hostapd_config_defaults_bss(struct hostapd_bss_config *bss)
 	/* Default to strict CRL checking. */
 	bss->check_crl_strict = 1;
 
+	bss->multi_ap_profile = MULTI_AP_PROFILE_2;
+
 #ifdef CONFIG_TESTING_OPTIONS
 	bss->sae_commit_status = -1;
 	bss->test_assoc_comeback_type = -1;
@@ -563,6 +565,10 @@ static void hostapd_config_free_radius(struct hostapd_radius_server *servers,
 
 	for (i = 0; i < num_servers; i++) {
 		os_free(servers[i].shared_secret);
+		os_free(servers[i].ca_cert);
+		os_free(servers[i].client_cert);
+		os_free(servers[i].private_key);
+		os_free(servers[i].private_key_passwd);
 	}
 	os_free(servers);
 }

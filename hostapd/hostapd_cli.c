@@ -1215,14 +1215,14 @@ static int hostapd_cli_cmd_notify_cw_change(struct wpa_ctrl *ctrl,
 
 
 static int hostapd_cli_cmd_enable(struct wpa_ctrl *ctrl, int argc,
-				      char *argv[])
+				  char *argv[])
 {
 	return wpa_ctrl_command(ctrl, "ENABLE");
 }
 
 
 static int hostapd_cli_cmd_reload(struct wpa_ctrl *ctrl, int argc,
-				      char *argv[])
+				  char *argv[])
 {
 	return wpa_ctrl_command(ctrl, "RELOAD");
 }
@@ -1243,7 +1243,7 @@ static int hostapd_cli_cmd_reload_config(struct wpa_ctrl *ctrl, int argc,
 
 
 static int hostapd_cli_cmd_disable(struct wpa_ctrl *ctrl, int argc,
-				      char *argv[])
+				   char *argv[])
 {
 	return wpa_ctrl_command(ctrl, "DISABLE");
 }
@@ -1257,14 +1257,14 @@ static int hostapd_cli_cmd_enable_mld(struct wpa_ctrl *ctrl, int argc,
 
 
 static int hostapd_cli_cmd_disable_mld(struct wpa_ctrl *ctrl, int argc,
-				      char *argv[])
+				       char *argv[])
 {
 	return wpa_ctrl_command(ctrl, "DISABLE_MLD");
 }
 
 
 static int hostapd_cli_cmd_update_beacon(struct wpa_ctrl *ctrl, int argc,
-				      char *argv[])
+					 char *argv[])
 {
 	return wpa_ctrl_command(ctrl, "UPDATE_BEACON");
 }
@@ -1283,6 +1283,13 @@ static int hostapd_cli_cmd_driver(struct wpa_ctrl *ctrl, int argc, char *argv[])
 	if (write_cmd(buf, sizeof(buf), "DRIVER", argc, argv) < 0)
 		return -1;
 	return wpa_ctrl_command(ctrl, buf);
+}
+
+
+static int hostapd_cli_cmd_stop_ap(struct wpa_ctrl *ctrl, int argc,
+				   char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "STOP_AP");
 }
 
 
@@ -1614,6 +1621,13 @@ static int hostapd_cli_cmd_req_beacon(struct wpa_ctrl *ctrl, int argc,
 }
 
 
+static int hostapd_cli_cmd_req_link_measurement(struct wpa_ctrl *ctrl, int argc,
+						char *argv[])
+{
+	return hostapd_cli_cmd(ctrl, "REQ_LINK_MEASUREMENT", 1, argc, argv);
+}
+
+
 static int hostapd_cli_cmd_reload_wpa_psk(struct wpa_ctrl *ctrl, int argc,
 					  char *argv[])
 {
@@ -1770,6 +1784,8 @@ static const struct hostapd_cli_cmd hostapd_cli_commands[] = {
 	  "= disable AP MLD to which the interface is affiliated" },
 	{ "update_beacon", hostapd_cli_cmd_update_beacon, NULL,
 	  "= update Beacon frame contents\n"},
+	{ "stop_ap", hostapd_cli_cmd_stop_ap, NULL,
+	  "= stop AP\n"},
 	{ "erp_flush", hostapd_cli_cmd_erp_flush, NULL,
 	  "= drop all ERP keys"},
 	{ "log_level", hostapd_cli_cmd_log_level, NULL,
@@ -1849,6 +1865,8 @@ static const struct hostapd_cli_cmd hostapd_cli_commands[] = {
 	  "<addr> = poll a STA to check connectivity with a QoS null frame" },
 	{ "req_beacon", hostapd_cli_cmd_req_beacon, NULL,
 	  "<addr> [req_mode=] <measurement request hexdump>  = send a Beacon report request to a station" },
+	{ "req_link_measurement", hostapd_cli_cmd_req_link_measurement, NULL,
+	  "<addr> = send a link measurement report request to a station"},
 	{ "reload_wpa_psk", hostapd_cli_cmd_reload_wpa_psk, NULL,
 	  "= reload wpa_psk_file only" },
 #ifdef CONFIG_IEEE80211R_AP

@@ -763,7 +763,7 @@ nl80211_parse_bss_info(struct wpa_driver_nl80211_data *drv,
 			     bss_policy))
 		return NULL;
 	if (bssid && bss[NL80211_BSS_BSSID] &&
-	    os_memcmp(bssid, nla_data(bss[NL80211_BSS_BSSID]), ETH_ALEN) != 0)
+	    !ether_addr_equal(bssid, nla_data(bss[NL80211_BSS_BSSID])))
 		return NULL;
 	if (bss[NL80211_BSS_INFORMATION_ELEMENTS]) {
 		ie = nla_data(bss[NL80211_BSS_INFORMATION_ELEMENTS]);
@@ -1274,6 +1274,11 @@ int wpa_driver_nl80211_vendor_scan(struct i802_bss *bss,
 			    params->bssid))
 			goto fail;
 	}
+
+	if (is_ap_interface(drv->nlmode) &&
+	    params->link_id != NL80211_DRV_LINK_ID_NA &&
+	    nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_SCAN_LINK_ID, params->link_id))
+		goto fail;
 
 	nla_nest_end(msg, attr);
 

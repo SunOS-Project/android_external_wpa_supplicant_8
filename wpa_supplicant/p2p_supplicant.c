@@ -1105,6 +1105,8 @@ static int wpas_p2p_group_delete(struct wpa_supplicant *wpa_s,
 
 	os_memset(wpa_s->go_dev_addr, 0, ETH_ALEN);
 
+	wpa_s->p2p_go_no_pri_sec_switch = 0;
+
 	return 0;
 }
 
@@ -7830,7 +7832,8 @@ int wpas_p2p_group_add(struct wpa_supplicant *wpa_s, int persistent_group,
 			return -1;
 	}
 
-	if (wpas_p2p_init_go_params(wpa_s, &params, selected_freq, vht_center_freq2,
+	if (wpas_p2p_init_go_params(wpa_s, &params, selected_freq,
+				    vht_center_freq2,
 				    ht40, vht, max_oper_chwidth, he, edmg,
 				    NULL))
 		return -1;

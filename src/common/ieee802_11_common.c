@@ -2591,21 +2591,141 @@ size_t mbo_add_ie(u8 *buf, size_t len, const u8 *attr, size_t attr_len)
 }
 
 
-size_t add_multi_ap_ie(u8 *buf, size_t len, u8 value)
+u16 check_multi_ap_ie(const u8 *multi_ap_ie, size_t multi_ap_len,
+		      struct multi_ap_params *multi_ap)
+{
+	const struct element *elem;
+	bool ext_present = false;
+	unsigned int vlan_id;
+
+	os_memset(multi_ap, 0, sizeof(*multi_ap));
+
+	/* Default profile is 1, when Multi-AP profile subelement is not
+	 * present in the element. */
+	multi_ap->profile = 1;
+
+	for_each_element(elem, multi_ap_ie, multi_ap_len) {
+		u8 id = elem->id, elen = elem->datalen;
+		const u8 *pos = elem->data;
+
+		switch (id) {
+		case MULTI_AP_SUB_ELEM_TYPE:
+			if (elen >= 1) {
+				multi_ap->capability = *pos;
+				ext_present = true;
+			} else {
+				wpa_printf(MSG_DEBUG,
+					   "Multi-AP invalid Multi-AP subelement");
+				return WLAN_STATUS_INVALID_IE;
+			}
+			break;
+		case MULTI_AP_PROFILE_SUB_ELEM_TYPE:
+			if (elen < 1) {
+				wpa_printf(MSG_DEBUG,
+					   "Multi-AP IE invalid Multi-AP profile subelement");
+				return WLAN_STATUS_INVALID_IE;
+			}
+
+			multi_ap->profile = *pos;
+			if (multi_ap->profile > MULTI_AP_PROFILE_MAX) {
+				wpa_printf(MSG_DEBUG,
+					   "Multi-AP IE with invalid profile 0x%02x",
+					   multi_ap->profile);
+				return WLAN_STATUS_ASSOC_DENIED_UNSPEC;
+			}
+			break;
+		case MULTI_AP_VLAN_SUB_ELEM_TYPE:
+			if (multi_ap->profile < MULTI_AP_PROFILE_2) {
+				wpa_printf(MSG_DEBUG,
+					   "Multi-AP IE invalid profile to read VLAN IE");
+				return WLAN_STATUS_INVALID_IE;
+			}
+			if (elen < 2) {
+				wpa_printf(MSG_DEBUG,
+					   "Multi-AP IE invalid Multi-AP VLAN subelement");
+				return WLAN_STATUS_INVALID_IE;
+			}
+
+			vlan_id = WPA_GET_LE16(pos);
+			if (vlan_id < 1 || vlan_id > 4094) {
+				wpa_printf(MSG_INFO,
+					   "Multi-AP IE invalid Multi-AP VLAN ID %d",
+					   vlan_id);
+				return WLAN_STATUS_INVALID_IE;
+			}
+			multi_ap->vlanid = vlan_id;
+			break;
+		default:
+			wpa_printf(MSG_DEBUG,
+				   "Ignore unknown subelement %u in Multi-AP IE",
+				   id);
+			break;
+		}
+	}
+
+	if (!for_each_element_completed(elem, multi_ap_ie, multi_ap_len)) {
+		wpa_printf(MSG_DEBUG, "Multi AP IE parse failed @%d",
+			   (int) (multi_ap_ie + multi_ap_len -
+				  (const u8 *) elem));
+		wpa_hexdump(MSG_MSGDUMP, "IEs", multi_ap_ie, multi_ap_len);
+	}
+
+	if (!ext_present) {
+		wpa_printf(MSG_DEBUG,
+			   "Multi-AP element without Multi-AP Extension subelement");
+		return WLAN_STATUS_INVALID_IE;
+	}
+
+	return WLAN_STATUS_SUCCESS;
+}
+
+
+size_t add_multi_ap_ie(u8 *buf, size_t len,
+		       const struct multi_ap_params *multi_ap)
 {
 	u8 *pos = buf;
+	u8 *len_ptr;
 
-	if (len < 9)
+	if (len < 6)
 		return 0;
 
 	*pos++ = WLAN_EID_VENDOR_SPECIFIC;
-	*pos++ = 7; /* len */
+	len_ptr = pos; /* Length field to be set at the end */
+	pos++;
 	WPA_PUT_BE24(pos, OUI_WFA);
 	pos += 3;
 	*pos++ = MULTI_AP_OUI_TYPE;
+
+	/* Multi-AP Extension subelement */
+	if (buf + len - pos < 3)
+		return 0;
 	*pos++ = MULTI_AP_SUB_ELEM_TYPE;
 	*pos++ = 1; /* len */
-	*pos++ = value;
+	*pos++ = multi_ap->capability;
+
+	/* Add Multi-AP Profile subelement only for R2 or newer configuration */
+	if (multi_ap->profile >= MULTI_AP_PROFILE_2) {
+		if (buf + len - pos < 3)
+			return 0;
+		*pos++ = MULTI_AP_PROFILE_SUB_ELEM_TYPE;
+		*pos++ = 1;
+		*pos++ = multi_ap->profile;
+	}
+
+	/* Add Multi-AP Default 802.1Q Setting subelement only for backhaul BSS
+	 */
+	if (multi_ap->vlanid &&
+	    multi_ap->profile >= MULTI_AP_PROFILE_2 &&
+	    (multi_ap->capability & MULTI_AP_BACKHAUL_BSS)) {
+		if (buf + len - pos < 4)
+			return 0;
+		*pos++ = MULTI_AP_VLAN_SUB_ELEM_TYPE;
+		*pos++ = 2;
+		WPA_PUT_LE16(pos, multi_ap->vlanid);
+		pos += 2;
+	}
+
+	*len_ptr = pos - len_ptr - 1;
 
 	return pos - buf;
 }

@@ -265,8 +265,8 @@ int hostapd_set_ap_wps_ie(struct hostapd_data *hapd)
 }
 
 
-static bool hostapd_sta_is_link_sta(struct hostapd_data *hapd,
-				    struct sta_info *sta)
+bool hostapd_sta_is_link_sta(struct hostapd_data *hapd,
+			     struct sta_info *sta)
 {
 #ifdef CONFIG_IEEE80211BE
 	if (ap_sta_is_mld(hapd, sta) &&
@@ -572,12 +572,33 @@ int hostapd_if_add(struct hostapd_data *hapd, enum wpa_driver_if_type type,
 }
 
 
+#ifdef CONFIG_IEEE80211BE
+int hostapd_if_link_remove(struct hostapd_data *hapd,
+			   enum wpa_driver_if_type type,
+			   const char *ifname, u8 link_id)
+{
+	if (!hapd->driver || !hapd->drv_priv || !hapd->driver->link_remove)
+		return -1;
+
+	return hapd->driver->link_remove(hapd->drv_priv, type, ifname,
+					 hapd->mld_link_id);
+}
+#endif /* CONFIG_IEEE80211BE */
+
+
 int hostapd_if_remove(struct hostapd_data *hapd, enum wpa_driver_if_type type,
 		      const char *ifname)
 {
 	if (hapd->driver == NULL || hapd->drv_priv == NULL ||
 	    hapd->driver->if_remove == NULL)
 		return -1;
+
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap)
+		return hostapd_if_link_remove(hapd, type, ifname,
+					      hapd->mld_link_id);
+#endif /* CONFIG_IEEE80211BE */
+
 	return hapd->driver->if_remove(hapd->drv_priv, type, ifname);
 }
 
@@ -629,7 +650,7 @@ int hostapd_set_freq(struct hostapd_data *hapd, enum hostapd_hw_mode mode,
 				    &cmode->he_capab[IEEE80211_MODE_AP] : NULL,
 				    cmode ?
 				    &cmode->eht_capab[IEEE80211_MODE_AP] :
-				    NULL))
+				    NULL, hostapd_get_punct_bitmap(hapd)))
 		return -1;
 
 	if (hapd->driver == NULL)
@@ -842,7 +863,7 @@ int hostapd_drv_sta_deauth(struct hostapd_data *hapd,
 
 		link_id = hapd->mld_link_id;
 		if (ap_sta_is_mld(hapd, sta))
-			own_addr = hapd->mld_addr;
+			own_addr = hapd->mld->mld_addr;
 	}
 #endif /* CONFIG_IEEE80211BE */
 
@@ -863,7 +884,7 @@ int hostapd_drv_sta_disassoc(struct hostapd_data *hapd,
 		struct sta_info *sta = ap_get_sta(hapd, addr);
 
 		if (ap_sta_is_mld(hapd, sta))
-			own_addr = hapd->mld_addr;
+			own_addr = hapd->mld->mld_addr;
 	}
 #endif /* CONFIG_IEEE80211BE */
 
@@ -924,7 +945,7 @@ static int hapd_drv_send_action(struct hostapd_data *hapd, unsigned int freq,
 		sta = ap_get_sta(hapd, dst);
 
 		if (ap_sta_is_mld(hapd, sta)) {
-			own_addr = hapd->mld_addr;
+			own_addr = hapd->mld->mld_addr;
 			bssid = own_addr;
 		}
 #endif /* CONFIG_IEEE80211BE */
@@ -995,7 +1016,8 @@ int hostapd_start_dfs_cac(struct hostapd_iface *iface,
 				    center_segment1,
 				    cmode->vht_capab,
 				    &cmode->he_capab[IEEE80211_MODE_AP],
-				    &cmode->eht_capab[IEEE80211_MODE_AP])) {
+				    &cmode->eht_capab[IEEE80211_MODE_AP],
+				    hostapd_get_punct_bitmap(hapd))) {
 		wpa_printf(MSG_ERROR, "Can't set freq params");
 		return -1;
 	}
@@ -1017,7 +1039,8 @@ int hostapd_start_dfs_cac(struct hostapd_iface *iface,
 int hostapd_drv_set_qos_map(struct hostapd_data *hapd,
 			    const u8 *qos_map_set, u8 qos_map_set_len)
 {
-	if (!hapd->driver || !hapd->driver->set_qos_map || !hapd->drv_priv)
+	if (!hapd->driver || !hapd->driver->set_qos_map || !hapd->drv_priv ||
+	    !(hapd->iface->drv_flags & WPA_DRIVER_FLAGS_QOS_MAPPING))
 		return 0;
 	return hapd->driver->set_qos_map(hapd->drv_priv, qos_map_set,
 					 qos_map_set_len);
