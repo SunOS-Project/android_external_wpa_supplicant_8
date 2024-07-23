@@ -45,6 +45,8 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
 	wconf->wpa = conf->wpa;
 	wconf->extended_key_id = conf->extended_key_id;
 	wconf->wpa_key_mgmt = conf->wpa_key_mgmt;
+	wconf->rsn_override_key_mgmt = conf->rsn_override_key_mgmt;
+	wconf->rsn_override_key_mgmt_2 = conf->rsn_override_key_mgmt_2;
 	wconf->wpa_pairwise = conf->wpa_pairwise;
 	wconf->wpa_group = conf->wpa_group;
 	wconf->wpa_group_rekey = conf->wpa_group_rekey;
@@ -56,6 +58,8 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
 		conf->wpa_disable_eapol_key_retries;
 	wconf->wpa_pairwise_update_count = conf->wpa_pairwise_update_count;
 	wconf->rsn_pairwise = conf->rsn_pairwise;
+	wconf->rsn_override_pairwise = conf->rsn_override_pairwise;
+	wconf->rsn_override_pairwise_2 = conf->rsn_override_pairwise_2;
 	wconf->rsn_preauth = conf->rsn_preauth;
 	wconf->eapol_version = conf->eapol_version;
 #ifdef CONFIG_MACSEC
@@ -70,14 +74,17 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
 #endif /* CONFIG_OCV */
 	wconf->okc = conf->okc;
 	wconf->ieee80211w = conf->ieee80211w;
+	wconf->rsn_override_mfp = conf->rsn_override_mfp;
+	wconf->rsn_override_mfp_2 = conf->rsn_override_mfp_2;
 	wconf->beacon_prot = conf->beacon_prot;
 	wconf->group_mgmt_cipher = conf->group_mgmt_cipher;
 	wconf->sae_require_mfp = conf->sae_require_mfp;
-#ifdef CONFIG_IEEE80211R_AP
+	wconf->ssid_protection = conf->ssid_protection;
 	wconf->ssid_len = conf->ssid.ssid_len;
 	if (wconf->ssid_len > SSID_MAX_LEN)
 		wconf->ssid_len = SSID_MAX_LEN;
 	os_memcpy(wconf->ssid, conf->ssid.ssid, wconf->ssid_len);
+#ifdef CONFIG_IEEE80211R_AP
 	os_memcpy(wconf->mobility_domain, conf->mobility_domain,
 		  MOBILITY_DOMAIN_ID_LEN);
 	if (conf->nas_identifier &&
@@ -227,6 +234,9 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
 #endif /* CONFIG_PASN */
 
 	wconf->radius_psk = conf->wpa_psk_radius == PSK_RADIUS_DURING_4WAY_HS;
+	wconf->no_disconnect_on_group_keyerror =
+		conf->bss_max_idle && conf->ap_max_inactivity &&
+		conf->no_disconnect_on_group_keyerror;
 }
 
 
@@ -1536,53 +1546,11 @@ static int hostapd_set_ltf_keyseed(void *ctx, const u8 *peer_addr,
 
 #ifdef CONFIG_IEEE80211BE
 
-static int hostapd_wpa_auth_get_ml_rsn_info(void *ctx,
-					    struct wpa_auth_ml_rsn_info *info)
-{
-	struct hostapd_data *hapd = ctx;
-	unsigned int i, j;
-
-	wpa_printf(MSG_DEBUG, "WPA_AUTH: MLD: Get RSN info CB: n_mld_links=%u",
-		   info->n_mld_links);
-
-	if (!hapd->conf->mld_ap || !hapd->iface || !hapd->iface->interfaces)
-		return -1;
-
-	for (i = 0; i < info->n_mld_links; i++) {
-		unsigned int link_id = info->links[i].link_id;
-
-		wpa_printf(MSG_DEBUG,
-			   "WPA_AUTH: MLD: Get link RSN CB: link_id=%u",
-			   link_id);
-
-		for (j = 0; j < hapd->iface->interfaces->count; j++) {
-			struct hostapd_iface *iface =
-				hapd->iface->interfaces->iface[j];
-
-			if (!hostapd_is_ml_partner(hapd, iface->bss[0]) ||
-			    link_id != iface->bss[0]->mld_link_id ||
-			    !iface->bss[0]->wpa_auth)
-				continue;
-
-			wpa_auth_ml_get_rsn_info(iface->bss[0]->wpa_auth,
-						 &info->links[i]);
-			break;
-		}
-
-		if (j == hapd->iface->interfaces->count)
-			wpa_printf(MSG_DEBUG,
-				   "WPA_AUTH: MLD: link=%u not found", link_id);
-	}
-
-	return 0;
-}
-
-
 static int hostapd_wpa_auth_get_ml_key_info(void *ctx,
 					    struct wpa_auth_ml_key_info *info)
 {
 	struct hostapd_data *hapd = ctx;
-	unsigned int i, j;
+	unsigned int i;
 
 	wpa_printf(MSG_DEBUG, "WPA_AUTH: MLD: Get key info CB: n_mld_links=%u",
 		   info->n_mld_links);
@@ -1591,29 +1559,35 @@ static int hostapd_wpa_auth_get_ml_key_info(void *ctx,
 		return -1;
 
 	for (i = 0; i < info->n_mld_links; i++) {
+		struct hostapd_data *bss;
 		u8 link_id = info->links[i].link_id;
+		bool link_bss_found = false;
 
 		wpa_printf(MSG_DEBUG,
 			   "WPA_AUTH: MLD: Get link info CB: link_id=%u",
 			   link_id);
 
-		for (j = 0; j < hapd->iface->interfaces->count; j++) {
-			struct hostapd_iface *iface =
-				hapd->iface->interfaces->iface[j];
-
-			if (!hostapd_is_ml_partner(hapd, iface->bss[0]) ||
-			    link_id != iface->bss[0]->mld_link_id ||
-			    !iface->bss[0]->wpa_auth)
-				continue;
-
-			wpa_auth_ml_get_key_info(iface->bss[0]->wpa_auth,
+		if (hapd->mld_link_id == link_id) {
+			wpa_auth_ml_get_key_info(hapd->wpa_auth,
 						 &info->links[i],
 						 info->mgmt_frame_prot,
 						 info->beacon_prot);
+			continue;
+		}
+
+		for_each_mld_link(bss, hapd) {
+			if (bss == hapd || bss->mld_link_id != link_id)
+				continue;
+
+			wpa_auth_ml_get_key_info(bss->wpa_auth,
+						 &info->links[i],
+						 info->mgmt_frame_prot,
+						 info->beacon_prot);
+			link_bss_found = true;
 			break;
 		}
 
-		if (j == hapd->iface->interfaces->count)
+		if (!link_bss_found)
 			wpa_printf(MSG_DEBUG,
 				   "WPA_AUTH: MLD: link=%u not found", link_id);
 	}
@@ -1689,7 +1663,6 @@ int hostapd_setup_wpa(struct hostapd_data *hapd)
 		.set_ltf_keyseed = hostapd_set_ltf_keyseed,
 #endif /* CONFIG_PASN */
 #ifdef CONFIG_IEEE80211BE
-		.get_ml_rsn_info = hostapd_wpa_auth_get_ml_rsn_info,
 		.get_ml_key_info = hostapd_wpa_auth_get_ml_key_info,
 #endif /* CONFIG_IEEE80211BE */
 		.get_drv_flags = hostapd_wpa_auth_get_drv_flags,
@@ -1739,6 +1712,27 @@ int hostapd_setup_wpa(struct hostapd_data *hapd)
 	_conf.prot_range_neg =
 		!!(hapd->iface->drv_flags2 &
 		   WPA_DRIVER_FLAGS2_PROT_RANGE_NEG_AP);
+
+#ifdef CONFIG_IEEE80211BE
+	_conf.mld_addr = NULL;
+	_conf.link_id = -1;
+	_conf.first_link_auth = NULL;
+
+	if (hapd->conf->mld_ap) {
+		struct hostapd_data *lhapd;
+
+		_conf.mld_addr = hapd->mld->mld_addr;
+		_conf.link_id = hapd->mld_link_id;
+
+		for_each_mld_link(lhapd, hapd) {
+			if (lhapd == hapd)
+				continue;
+
+			if (lhapd->wpa_auth)
+				_conf.first_link_auth = lhapd->wpa_auth;
+		}
+	}
+#endif /* CONFIG_IEEE80211BE */
 
 	hapd->wpa_auth = wpa_init(hapd->own_addr, &_conf, &cb, hapd);
 	if (hapd->wpa_auth == NULL) {

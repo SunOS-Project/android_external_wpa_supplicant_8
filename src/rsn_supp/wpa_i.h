@@ -113,6 +113,7 @@ struct wpa_sm {
 	unsigned int secure_ltf:1;
 	unsigned int secure_rtt:1;
 	unsigned int prot_range_neg:1;
+	unsigned int ssid_protection:1;
 
 	u8 *assoc_wpa_ie; /* Own WPA/RSN IE from (Re)AssocReq */
 	size_t assoc_wpa_ie_len;
@@ -516,6 +517,12 @@ wpa_sm_notify_pmksa_cache_entry(struct wpa_sm *sm,
 {
 	if (sm->ctx->notify_pmksa_cache_entry)
 		sm->ctx->notify_pmksa_cache_entry(sm->ctx->ctx, entry);
+}
+
+static inline void wpa_sm_ssid_verified(struct wpa_sm *sm)
+{
+	if (sm->ctx->ssid_verified)
+		sm->ctx->ssid_verified(sm->ctx->ctx);
 }
 
 int wpa_eapol_key_send(struct wpa_sm *sm, struct wpa_ptk *ptk,

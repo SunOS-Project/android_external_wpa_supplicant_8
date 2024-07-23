@@ -277,6 +277,14 @@ static int hostapd_ctrl_iface_sta_mib(struct hostapd_data *hapd,
 		return len;
 	len += ret;
 
+	if (sta->max_idle_period) {
+		ret = os_snprintf(buf + len, buflen - len,
+				  "max_idle_period=%d\n", sta->max_idle_period);
+		if (os_snprintf_error(buflen - len, ret))
+			return len;
+		len += ret;
+	}
+
 	res = ieee802_11_get_mib_sta(hapd, sta, buf + len, buflen - len);
 	if (res >= 0)
 		len += res;
@@ -901,6 +909,42 @@ int hostapd_ctrl_iface_status(struct hostapd_data *hapd, char *buf,
 			if (os_snprintf_error(buflen - len, ret))
 				return len;
 			len += ret;
+		}
+
+		if (hapd->conf->mld_ap) {
+			struct hostapd_data *link_bss;
+
+			ret = os_snprintf(buf + len, buflen - len,
+					  "num_links=%d\n",
+					  hapd->mld->num_links);
+			if (os_snprintf_error(buflen - len, ret))
+				return len;
+			len += ret;
+
+			/* Self BSS */
+			ret = os_snprintf(buf + len, buflen - len,
+					  "link_id=%d\n"
+					  "link_addr=" MACSTR "\n",
+					  hapd->mld_link_id,
+					  MAC2STR(hapd->own_addr));
+			if (os_snprintf_error(buflen - len, ret))
+				return len;
+			len += ret;
+
+			/* Partner BSSs */
+			for_each_mld_link(link_bss, hapd) {
+				if (link_bss == hapd)
+					continue;
+
+				ret = os_snprintf(buf + len, buflen - len,
+						  "partner_link[%d]=" MACSTR
+						  "\n",
+						  link_bss->mld_link_id,
+						  MAC2STR(link_bss->own_addr));
+				if (os_snprintf_error(buflen - len, ret))
+					return len;
+				len += ret;
+			}
 		}
 	}
 #endif /* CONFIG_IEEE80211BE */

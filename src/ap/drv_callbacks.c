@@ -514,11 +514,15 @@ int hostapd_notif_assoc(struct hostapd_data *hapd, const u8 *addr,
 				   "Failed to initialize WPA state machine");
 			return -1;
 		}
+		wpa_auth_set_rsn_override(sta->wpa_sm,
+					  elems.rsne_override != NULL);
+		wpa_auth_set_rsn_override_2(sta->wpa_sm,
+					    elems.rsne_override_2 != NULL);
 #ifdef CONFIG_IEEE80211BE
 		if (ap_sta_is_mld(hapd, sta)) {
 			wpa_printf(MSG_DEBUG,
 				   "MLD: Set ML info in RSN Authenticator");
-			wpa_auth_set_ml_info(sta->wpa_sm, hapd->mld->mld_addr,
+			wpa_auth_set_ml_info(sta->wpa_sm,
 					     sta->mld_assoc_link_id,
 					     &sta->mld_info);
 		}
@@ -529,7 +533,7 @@ int hostapd_notif_assoc(struct hostapd_data *hapd, const u8 *addr,
 					  elems.rsnxe ? elems.rsnxe - 2 : NULL,
 					  elems.rsnxe ? elems.rsnxe_len + 2 : 0,
 					  elems.mdie, elems.mdie_len,
-					  elems.owe_dh, elems.owe_dh_len);
+					  elems.owe_dh, elems.owe_dh_len, NULL);
 		reason = WLAN_REASON_INVALID_IE;
 		status = WLAN_STATUS_INVALID_IE;
 		switch (res) {
@@ -1538,7 +1542,6 @@ int hostapd_probe_req_rx(struct hostapd_data *hapd, const u8 *sa, const u8 *da,
 
 #ifdef CONFIG_IEEE80211R_AP
 static void hostapd_notify_auth_ft_finish(void *ctx, const u8 *dst,
-					  const u8 *bssid,
 					  u16 auth_transaction, u16 status,
 					  const u8 *ies, size_t ies_len)
 {
@@ -1614,7 +1617,7 @@ static void hostapd_notif_auth(struct hostapd_data *hapd,
 			status = WLAN_STATUS_UNSPECIFIED_FAILURE;
 			goto fail;
 		}
-		wpa_ft_process_auth(sta->wpa_sm, rx_auth->bssid,
+		wpa_ft_process_auth(sta->wpa_sm,
 				    rx_auth->auth_transaction, rx_auth->ies,
 				    rx_auth->ies_len,
 				    hostapd_notify_auth_ft_finish, hapd);
@@ -1781,7 +1784,7 @@ switch_link_scan(struct hostapd_data *hapd, u64 scan_cookie)
 #define HAPD_BROADCAST ((struct hostapd_data *) -1)
 
 static struct hostapd_data * get_hapd_bssid(struct hostapd_iface *iface,
-					    const u8 *bssid)
+					    const u8 *bssid, int link_id)
 {
 	size_t i;
 
@@ -1797,8 +1800,35 @@ static struct hostapd_data * get_hapd_bssid(struct hostapd_iface *iface,
 #endif /* CONFIG_NAN_USD */
 
 	for (i = 0; i < iface->num_bss; i++) {
-		if (ether_addr_equal(bssid, iface->bss[i]->own_addr))
-			return iface->bss[i];
+		struct hostapd_data *hapd;
+#ifdef CONFIG_IEEE80211BE
+		struct hostapd_data *p_hapd;
+#endif /* CONFIG_IEEE80211BE */
+
+		hapd = iface->bss[i];
+		if (ether_addr_equal(bssid, hapd->own_addr))
+			return hapd;
+
+#ifdef CONFIG_IEEE80211BE
+		if (ether_addr_equal(bssid, hapd->own_addr) ||
+		    (hapd->conf->mld_ap &&
+		     ether_addr_equal(bssid, hapd->mld->mld_addr) &&
+		     link_id == hapd->mld_link_id))
+			return hapd;
+
+		if (!hapd->conf->mld_ap)
+			continue;
+
+		for_each_mld_link(p_hapd, hapd) {
+			if (p_hapd == hapd)
+				continue;
+
+			if (ether_addr_equal(bssid, p_hapd->own_addr) ||
+			    (ether_addr_equal(bssid, p_hapd->mld->mld_addr) &&
+			     link_id == p_hapd->mld_link_id))
+				return p_hapd;
+		}
+#endif /* CONFIG_IEEE80211BE */
 	}
 
 	return NULL;
@@ -1809,7 +1839,7 @@ static void hostapd_rx_from_unknown_sta(struct hostapd_data *hapd,
 					const u8 *bssid, const u8 *addr,
 					int wds)
 {
-	hapd = get_hapd_bssid(hapd->iface, bssid);
+	hapd = get_hapd_bssid(hapd->iface, bssid, -1);
 	if (hapd == NULL || hapd == HAPD_BROADCAST)
 		return;
 
@@ -1824,8 +1854,9 @@ static int hostapd_mgmt_rx(struct hostapd_data *hapd, struct rx_mgmt *rx_mgmt)
 	const u8 *bssid;
 	struct hostapd_frame_info fi;
 	int ret;
-	bool is_mld = false;
 
+	if (rx_mgmt->ctx)
+		hapd = rx_mgmt->ctx;
 	hapd = switch_link_hapd(hapd, rx_mgmt->link_id);
 	iface = hapd->iface;
 
@@ -1849,14 +1880,7 @@ static int hostapd_mgmt_rx(struct hostapd_data *hapd, struct rx_mgmt *rx_mgmt)
 	if (bssid == NULL)
 		return 0;
 
-#ifdef CONFIG_IEEE80211BE
-	if (hapd->conf->mld_ap &&
-	    ether_addr_equal(hapd->mld->mld_addr, bssid))
-		is_mld = true;
-#endif /* CONFIG_IEEE80211BE */
-
-	if (!is_mld)
-		hapd = get_hapd_bssid(iface, bssid);
+	hapd = get_hapd_bssid(iface, bssid, rx_mgmt->link_id);
 
 	if (!hapd) {
 		u16 fc = le_to_host16(hdr->frame_control);
@@ -1908,17 +1932,11 @@ static void hostapd_mgmt_tx_cb(struct hostapd_data *hapd, const u8 *buf,
 	struct ieee80211_hdr *hdr;
 	struct hostapd_data *orig_hapd, *tmp_hapd;
 
-#ifdef CONFIG_IEEE80211BE
-	if (hapd->conf->mld_ap && link_id != -1) {
-		tmp_hapd = hostapd_mld_get_link_bss(hapd, link_id);
-		if (tmp_hapd)
-			hapd = tmp_hapd;
-	}
-#endif /* CONFIG_IEEE80211BE */
 	orig_hapd = hapd;
 
 	hdr = (struct ieee80211_hdr *) buf;
-	tmp_hapd = get_hapd_bssid(hapd->iface, get_hdr_bssid(hdr, len));
+	hapd = switch_link_hapd(hapd, link_id);
+	tmp_hapd = get_hapd_bssid(hapd->iface, get_hdr_bssid(hdr, len), link_id);
 	if (tmp_hapd) {
 		hapd = tmp_hapd;
 #ifdef CONFIG_IEEE80211BE
@@ -1935,7 +1953,7 @@ static void hostapd_mgmt_tx_cb(struct hostapd_data *hapd, const u8 *buf,
 		if (stype != WLAN_FC_STYPE_ACTION || len <= 25 ||
 		    buf[24] != WLAN_ACTION_PUBLIC)
 			return;
-		hapd = get_hapd_bssid(orig_hapd->iface, hdr->addr2);
+		hapd = get_hapd_bssid(orig_hapd->iface, hdr->addr2, link_id);
 		if (!hapd || hapd == HAPD_BROADCAST)
 			return;
 		/*
@@ -1972,52 +1990,47 @@ static int hostapd_event_new_sta(struct hostapd_data *hapd, const u8 *addr)
 
 
 static struct hostapd_data * hostapd_find_by_sta(struct hostapd_iface *iface,
-						 const u8 *src, bool rsn)
+						 const u8 *src, bool rsn,
+						 struct sta_info **sta_ret)
 {
+	struct hostapd_data *hapd;
 	struct sta_info *sta;
 	unsigned int j;
 
+	if (sta_ret)
+		*sta_ret = NULL;
+
 	for (j = 0; j < iface->num_bss; j++) {
-		sta = ap_get_sta(iface->bss[j], src);
+		hapd = iface->bss[j];
+		sta = ap_get_sta(hapd, src);
 		if (sta && (sta->flags & WLAN_STA_ASSOC) &&
-		    (!rsn || sta->wpa_sm))
-			return iface->bss[j];
+		    (!rsn || sta->wpa_sm)) {
+			if (sta_ret)
+				*sta_ret = sta;
+			return hapd;
+		}
+#ifdef CONFIG_IEEE80211BE
+		if (hapd->conf->mld_ap) {
+			struct hostapd_data *p_hapd;
+
+			for_each_mld_link(p_hapd, hapd) {
+				if (p_hapd == hapd)
+					continue;
+
+				sta = ap_get_sta(p_hapd, src);
+				if (sta && (sta->flags & WLAN_STA_ASSOC) &&
+				    (!rsn || sta->wpa_sm)) {
+					if (sta_ret)
+						*sta_ret = sta;
+					return p_hapd;
+				}
+			}
+		}
+#endif /* CONFIG_IEEE80211BE */
 	}
 
 	return NULL;
 }
-
-
-#ifdef CONFIG_IEEE80211BE
-static bool search_mld_sta(struct hostapd_data **p_hapd, const u8 *src)
-{
-	struct hostapd_data *hapd = *p_hapd;
-	unsigned int i;
-
-	/* Search for STA on other MLO BSSs */
-	for (i = 0; i < hapd->iface->interfaces->count; i++) {
-		struct hostapd_iface *h =
-			hapd->iface->interfaces->iface[i];
-		struct hostapd_data *h_hapd = h->bss[0];
-
-		if (!hostapd_is_ml_partner(h_hapd, hapd))
-			continue;
-
-		h_hapd = hostapd_find_by_sta(h, src, false);
-		if (h_hapd) {
-			struct sta_info *sta = ap_get_sta(h_hapd, src);
-
-			if (sta && sta->mld_info.mld_sta &&
-			    sta->mld_assoc_link_id != h_hapd->mld_link_id)
-				continue;
-			*p_hapd = h_hapd;
-			return true;
-		}
-	}
-
-	return false;
-}
-#endif /* CONFIG_IEEE80211BE */
 
 
 static void hostapd_event_eapol_rx(struct hostapd_data *hapd, const u8 *src,
@@ -2028,28 +2041,10 @@ static void hostapd_event_eapol_rx(struct hostapd_data *hapd, const u8 *src,
 	struct hostapd_data *orig_hapd = hapd;
 
 #ifdef CONFIG_IEEE80211BE
-	if (link_id != -1) {
-		struct hostapd_data *h_hapd;
-
-		hapd = switch_link_hapd(hapd, link_id);
-		h_hapd = hostapd_find_by_sta(hapd->iface, src, true);
-		if (!h_hapd)
-			h_hapd = hostapd_find_by_sta(orig_hapd->iface, src,
-						     true);
-		if (!h_hapd)
-			h_hapd = hostapd_find_by_sta(hapd->iface, src, false);
-		if (!h_hapd)
-			h_hapd = hostapd_find_by_sta(orig_hapd->iface, src,
-						     false);
-		if (h_hapd)
-			hapd = h_hapd;
-	} else if (hapd->conf->mld_ap) {
-		search_mld_sta(&hapd, src);
-	} else {
-		hapd = hostapd_find_by_sta(hapd->iface, src, false);
-	}
+	hapd = switch_link_hapd(hapd, link_id);
+	hapd = hostapd_find_by_sta(hapd->iface, src, true, NULL);
 #else /* CONFIG_IEEE80211BE */
-	hapd = hostapd_find_by_sta(hapd->iface, src, false);
+	hapd = hostapd_find_by_sta(hapd->iface, src, false, NULL);
 #endif /* CONFIG_IEEE80211BE */
 
 	if (!hapd) {
@@ -2379,6 +2374,54 @@ err:
 #endif /* CONFIG_OWE */
 
 
+#ifdef NEED_AP_MLME
+static void hostapd_eapol_tx_status(struct hostapd_data *hapd, const u8 *dst,
+				    const u8 *data, size_t len, int ack,
+				    int link_id)
+{
+	struct sta_info *sta;
+
+	hapd = switch_link_hapd(hapd, link_id);
+	hapd = hostapd_find_by_sta(hapd->iface, dst, false, &sta);
+
+	if (!sta) {
+		wpa_printf(MSG_DEBUG, "Ignore TX status for Data frame to STA "
+			   MACSTR " that is not currently associated",
+			   MAC2STR(dst));
+		return;
+	}
+
+	ieee802_1x_eapol_tx_status(hapd, sta, data, len, ack);
+}
+#endif /* NEED_AP_MLME */
+
+
+#ifdef CONFIG_IEEE80211AX
+static void hostapd_event_color_change(struct hostapd_data *hapd, bool success)
+{
+	struct hostapd_data *bss;
+	size_t i;
+
+	for (i = 0; i < hapd->iface->num_bss; i++) {
+		bss = hapd->iface->bss[i];
+		if (bss->cca_color == 0)
+			continue;
+
+		if (success)
+			hapd->iface->conf->he_op.he_bss_color = bss->cca_color;
+
+		bss->cca_in_progress = 0;
+		if (ieee802_11_set_beacon(bss)) {
+			wpa_printf(MSG_ERROR, "Failed to remove BCCA element");
+			bss->cca_in_progress = 1;
+		} else {
+			hostapd_cleanup_cca_params(bss);
+		}
+	}
+}
+#endif  /* CONFIG_IEEE80211AX */
+
+
 void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 			  union wpa_event_data *data)
 {
@@ -2457,11 +2500,11 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 		}
 		break;
 	case EVENT_EAPOL_TX_STATUS:
-		hapd = switch_link_hapd(hapd, data->eapol_tx_status.link_id);
 		hostapd_eapol_tx_status(hapd, data->eapol_tx_status.dst,
 					data->eapol_tx_status.data,
 					data->eapol_tx_status.data_len,
-					data->eapol_tx_status.ack);
+					data->eapol_tx_status.ack,
+					data->eapol_tx_status.link_id);
 		break;
 	case EVENT_DRIVER_CLIENT_POLL_OK:
 		hostapd_client_poll_ok(hapd, data->client_poll.addr);
@@ -2704,26 +2747,32 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 		/* The BSS color is shared amongst all BBSs on a specific phy.
 		 * Therefore we always start the color change on the primary
 		 * BSS. */
+		hapd = switch_link_hapd(hapd,
+					data->bss_color_collision.link_id);
 		wpa_printf(MSG_DEBUG, "BSS color collision on %s",
 			   hapd->conf->iface);
 		hostapd_switch_color(hapd->iface->bss[0],
 				     data->bss_color_collision.bitmap);
 		break;
 	case EVENT_CCA_STARTED_NOTIFY:
-		wpa_printf(MSG_DEBUG, "CCA started on on %s",
+		hapd = switch_link_hapd(hapd,
+					data->bss_color_collision.link_id);
+		wpa_printf(MSG_DEBUG, "CCA started on %s",
 			   hapd->conf->iface);
 		break;
 	case EVENT_CCA_ABORTED_NOTIFY:
-		wpa_printf(MSG_DEBUG, "CCA aborted on on %s",
+		hapd = switch_link_hapd(hapd,
+					data->bss_color_collision.link_id);
+		wpa_printf(MSG_DEBUG, "CCA aborted on %s",
 			   hapd->conf->iface);
-		hostapd_cleanup_cca_params(hapd);
+		hostapd_event_color_change(hapd, false);
 		break;
 	case EVENT_CCA_NOTIFY:
-		wpa_printf(MSG_DEBUG, "CCA finished on on %s",
+		hapd = switch_link_hapd(hapd,
+					data->bss_color_collision.link_id);
+		wpa_printf(MSG_DEBUG, "CCA finished on %s",
 			   hapd->conf->iface);
-		if (hapd->cca_color)
-			hapd->iface->conf->he_op.he_bss_color = hapd->cca_color;
-		hostapd_cleanup_cca_params(hapd);
+		hostapd_event_color_change(hapd, true);
 		break;
 #endif /* CONFIG_IEEE80211AX */
 	default:

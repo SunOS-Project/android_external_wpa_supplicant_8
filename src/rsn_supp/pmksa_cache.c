@@ -255,13 +255,13 @@ pmksa_cache_add(struct rsn_pmksa_cache *pmksa, const u8 *pmk, size_t pmk_len,
 	if (pmkid) {
  		os_memcpy(entry->pmkid, pmkid, PMKID_LEN);
 	} else if (akmp == WPA_KEY_MGMT_IEEE8021X_SUITE_B_192) {
-		if (kck) {
+		if (kck && kck_len > 0) {
 			rsn_pmkid_suite_b_192(kck, kck_len, aa, spa, entry->pmkid);
 			os_memcpy(entry->kck, kck, kck_len);
 			entry->kck_len = kck_len;
 		}
 	} else if (wpa_key_mgmt_suite_b(akmp)) {
-		if (kck) {
+		if (kck && kck_len > 0) {
 			rsn_pmkid_suite_b(kck, kck_len, aa, spa, entry->pmkid);
 			os_memcpy(entry->kck, kck, kck_len);
 			entry->kck_len = kck_len;

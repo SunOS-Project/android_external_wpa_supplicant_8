@@ -21,7 +21,7 @@
 #include "driver_nl80211.h"
 
 static void
-nl80211_control_port_frame_tx_status(struct wpa_driver_nl80211_data *drv,
+nl80211_control_port_frame_tx_status(struct i802_bss *bss,
 				     const u8 *frame, size_t len,
 				     struct nlattr *ack, struct nlattr *cookie);
 
@@ -1273,8 +1273,14 @@ static void mlme_event_ch_switch(struct wpa_driver_nl80211_data *drv,
 			mld_link = nl80211_get_link(bss,
 						    data.ch_switch.link_id);
 			mld_link->freq = data.ch_switch.freq;
+			if (bw)
+				mld_link->bandwidth = channel_width_to_int(
+					data.ch_switch.ch_width);
 		} else {
 			bss->flink->freq = data.ch_switch.freq;
+			if (bw)
+				bss->flink->bandwidth = channel_width_to_int(
+					data.ch_switch.ch_width);
 		}
 	}
 
@@ -1368,18 +1374,20 @@ static void mlme_event_mgmt(struct i802_bss *bss,
 	event.rx_mgmt.frame_len = len;
 	event.rx_mgmt.ssi_signal = ssi_signal;
 	event.rx_mgmt.drv_priv = bss;
+	event.rx_mgmt.ctx = bss->ctx;
 	event.rx_mgmt.link_id = link_id;
 
 	wpa_supplicant_event(drv->ctx, EVENT_RX_MGMT, &event);
 }
 
 
-static void mlme_event_mgmt_tx_status(struct wpa_driver_nl80211_data *drv,
+static void mlme_event_mgmt_tx_status(struct i802_bss *bss,
 				      struct nlattr *cookie, const u8 *frame,
 				      size_t len, struct nlattr *ack)
 {
 	union wpa_event_data event;
 	const struct ieee80211_hdr *hdr = (const struct ieee80211_hdr *) frame;
+	struct wpa_driver_nl80211_data *drv = bss->drv;
 	u16 fc = le_to_host16(hdr->frame_control);
 	u64 cookie_val = 0;
 
@@ -1398,7 +1406,7 @@ static void mlme_event_mgmt_tx_status(struct wpa_driver_nl80211_data *drv,
 	    WPA_GET_BE16(frame + 2 * ETH_ALEN) == ETH_P_PAE) {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: Work around misdelivered control port TX status for EAPOL");
-		nl80211_control_port_frame_tx_status(drv, frame, len, ack,
+		nl80211_control_port_frame_tx_status(bss, frame, len, ack,
 						     cookie);
 		return;
 	}
@@ -1434,7 +1442,7 @@ static void mlme_event_mgmt_tx_status(struct wpa_driver_nl80211_data *drv,
 	event.tx_status.ack = ack != NULL;
 	event.tx_status.link_id = cookie_val == drv->send_frame_cookie ?
 		drv->send_frame_link_id : NL80211_DRV_LINK_ID_NA;
-	wpa_supplicant_event(drv->ctx, EVENT_TX_STATUS, &event);
+	wpa_supplicant_event(bss->ctx, EVENT_TX_STATUS, &event);
 }
 
 
@@ -1742,7 +1750,7 @@ static void mlme_event(struct i802_bss *bss,
 				nla_len(frame), link_id);
 		break;
 	case NL80211_CMD_FRAME_TX_STATUS:
-		mlme_event_mgmt_tx_status(drv, cookie, nla_data(frame),
+		mlme_event_mgmt_tx_status(bss, cookie, nla_data(frame),
 					  nla_len(frame), ack);
 		break;
 	case NL80211_CMD_UNPROT_DEAUTHENTICATE:
@@ -3708,8 +3716,7 @@ static void nl80211_sta_opmode_change_event(struct wpa_driver_nl80211_data *drv,
 }
 
 
-static void nl80211_control_port_frame(struct wpa_driver_nl80211_data *drv,
-				       struct nlattr **tb)
+static void nl80211_control_port_frame(struct i802_bss *bss, struct nlattr **tb)
 {
 	u8 *src_addr;
 	u16 ethertype;
@@ -3738,7 +3745,7 @@ static void nl80211_control_port_frame(struct wpa_driver_nl80211_data *drv,
 			   MAC2STR(src_addr));
 		break;
 	case ETH_P_PAE:
-		drv_event_eapol_rx2(drv->ctx, src_addr,
+		drv_event_eapol_rx2(bss->ctx, src_addr,
 				    nla_data(tb[NL80211_ATTR_FRAME]),
 				    nla_len(tb[NL80211_ATTR_FRAME]),
 				    encrypted, link_id);
@@ -3754,10 +3761,11 @@ static void nl80211_control_port_frame(struct wpa_driver_nl80211_data *drv,
 
 
 static void
-nl80211_control_port_frame_tx_status(struct wpa_driver_nl80211_data *drv,
+nl80211_control_port_frame_tx_status(struct i802_bss *bss,
 				     const u8 *frame, size_t len,
 				     struct nlattr *ack, struct nlattr *cookie)
 {
+	struct wpa_driver_nl80211_data *drv = bss->drv;
 	union wpa_event_data event;
 
 	if (!cookie || len < ETH_HLEN)
@@ -3776,7 +3784,7 @@ nl80211_control_port_frame_tx_status(struct wpa_driver_nl80211_data *drv,
 		nla_get_u64(cookie) == drv->eapol_tx_cookie ?
 		drv->eapol_tx_link_id : NL80211_DRV_LINK_ID_NA;
 
-	wpa_supplicant_event(drv->ctx, EVENT_EAPOL_TX_STATUS, &event);
+	wpa_supplicant_event(bss->ctx, EVENT_EAPOL_TX_STATUS, &event);
 }
 
 
@@ -3834,48 +3842,62 @@ static void nl80211_assoc_comeback(struct wpa_driver_nl80211_data *drv,
 
 #ifdef CONFIG_IEEE80211AX
 
-static void nl80211_obss_color_collision(struct i802_bss *bss,
-					 struct nlattr *tb[])
+static void nl80211_obss_color_event(struct i802_bss *bss,
+				     enum nl80211_commands cmd,
+				     struct nlattr *tb[])
 {
 	union wpa_event_data data;
-
-	if (!tb[NL80211_ATTR_OBSS_COLOR_BITMAP])
-		return;
+	enum wpa_event_type event_type;
 
 	os_memset(&data, 0, sizeof(data));
-	data.bss_color_collision.bitmap =
-		nla_get_u64(tb[NL80211_ATTR_OBSS_COLOR_BITMAP]);
+	data.bss_color_collision.link_id = NL80211_DRV_LINK_ID_NA;
 
-	wpa_printf(MSG_DEBUG, "nl80211: BSS color collision - bitmap %08llx",
-		   (long long unsigned int) data.bss_color_collision.bitmap);
-	wpa_supplicant_event(bss->ctx, EVENT_BSS_COLOR_COLLISION, &data);
-}
+	switch (cmd) {
+	case NL80211_CMD_OBSS_COLOR_COLLISION:
+		event_type = EVENT_BSS_COLOR_COLLISION;
+		if (!tb[NL80211_ATTR_OBSS_COLOR_BITMAP])
+			return;
+		data.bss_color_collision.bitmap =
+			nla_get_u64(tb[NL80211_ATTR_OBSS_COLOR_BITMAP]);
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: BSS color collision - bitmap %08llx",
+			   (long long unsigned int)
+			   data.bss_color_collision.bitmap);
+		break;
+	case NL80211_CMD_COLOR_CHANGE_STARTED:
+		event_type = EVENT_CCA_STARTED_NOTIFY;
+		wpa_printf(MSG_DEBUG, "nl80211: CCA started");
+		break;
+	case NL80211_CMD_COLOR_CHANGE_ABORTED:
+		event_type = EVENT_CCA_ABORTED_NOTIFY;
+		wpa_printf(MSG_DEBUG, "nl80211: CCA aborted");
+		break;
+	case NL80211_CMD_COLOR_CHANGE_COMPLETED:
+		event_type = EVENT_CCA_NOTIFY;
+		wpa_printf(MSG_DEBUG, "nl80211: CCA completed");
+		break;
+	default:
+		wpa_printf(MSG_DEBUG, "nl80211: Unknown CCA command %d", cmd);
+		return;
+	}
 
+	if (tb[NL80211_ATTR_MLO_LINK_ID]) {
+		data.bss_color_collision.link_id =
+			nla_get_u8(tb[NL80211_ATTR_MLO_LINK_ID]);
 
-static void nl80211_color_change_announcement_started(struct i802_bss *bss)
-{
-	union wpa_event_data data = {};
+		if (!nl80211_link_valid(bss->valid_links,
+					data.bss_color_collision.link_id)) {
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: Invalid BSS color event link ID %d",
+				   data.bss_color_collision.link_id);
+			return;
+		}
 
-	wpa_printf(MSG_DEBUG, "nl80211: CCA started");
-	wpa_supplicant_event(bss->ctx, EVENT_CCA_STARTED_NOTIFY, &data);
-}
+		wpa_printf(MSG_DEBUG, "nl80211: BSS color event - Link ID %d",
+			   data.bss_color_collision.link_id);
+	}
 
-
-static void nl80211_color_change_announcement_aborted(struct i802_bss *bss)
-{
-	union wpa_event_data data = {};
-
-	wpa_printf(MSG_DEBUG, "nl80211: CCA aborted");
-	wpa_supplicant_event(bss->ctx, EVENT_CCA_ABORTED_NOTIFY, &data);
-}
-
-
-static void nl80211_color_change_announcement_completed(struct i802_bss *bss)
-{
-	union wpa_event_data data = {};
-
-	wpa_printf(MSG_DEBUG, "nl80211: CCA completed");
-	wpa_supplicant_event(bss->ctx, EVENT_CCA_NOTIFY, &data);
+	wpa_supplicant_event(bss->ctx, event_type, &data);
 }
 
 #endif /* CONFIG_IEEE80211AX */
@@ -4121,7 +4143,7 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 	case NL80211_CMD_CONTROL_PORT_FRAME_TX_STATUS:
 		if (!frame)
 			break;
-		nl80211_control_port_frame_tx_status(drv,
+		nl80211_control_port_frame_tx_status(bss,
 						     nla_data(frame),
 						     nla_len(frame),
 						     tb[NL80211_ATTR_ACK],
@@ -4136,16 +4158,10 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 		break;
 #ifdef CONFIG_IEEE80211AX
 	case NL80211_CMD_OBSS_COLOR_COLLISION:
-		nl80211_obss_color_collision(bss, tb);
-		break;
 	case NL80211_CMD_COLOR_CHANGE_STARTED:
-		nl80211_color_change_announcement_started(bss);
-		break;
 	case NL80211_CMD_COLOR_CHANGE_ABORTED:
-		nl80211_color_change_announcement_aborted(bss);
-		break;
 	case NL80211_CMD_COLOR_CHANGE_COMPLETED:
-		nl80211_color_change_announcement_completed(bss);
+		nl80211_obss_color_event(bss, cmd, tb);
 		break;
 #endif /* CONFIG_IEEE80211AX */
 	case NL80211_CMD_LINKS_REMOVED:
@@ -4294,7 +4310,7 @@ int process_bss_event(struct nl_msg *msg, void *arg)
 		nl80211_external_auth(bss->drv, tb);
 		break;
 	case NL80211_CMD_CONTROL_PORT_FRAME:
-		nl80211_control_port_frame(bss->drv, tb);
+		nl80211_control_port_frame(bss, tb);
 		break;
 	default:
 		wpa_printf(MSG_DEBUG, "nl80211: Ignored unknown event "

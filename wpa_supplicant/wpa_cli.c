@@ -29,7 +29,7 @@
 
 static const char *const wpa_cli_version =
 "wpa_cli v" VERSION_STR "\n"
-"Copyright (c) 2004-2022, Jouni Malinen <j@w1.fi> and contributors";
+"Copyright (c) 2004-2024, Jouni Malinen <j@w1.fi> and contributors";
 
 #define VENDOR_ELEM_FRAME_ID \
 	"  0: Probe Req (P2P), 1: Probe Resp (P2P) , 2: Probe Resp (GO), " \
@@ -4379,6 +4379,8 @@ static void wpa_cli_action_process(const char *msg)
 			wpa_cli_exec(action_file, ifname, "DISCONNECTED");
 		}
 	} else if (str_starts(pos, WPA_EVENT_CHANNEL_SWITCH_STARTED)) {
+		wpa_cli_exec(action_file, ctrl_ifname, pos);
+	} else if (str_starts(pos, WPA_EVENT_CHANNEL_SWITCH)) {
 		wpa_cli_exec(action_file, ctrl_ifname, pos);
 	} else if (str_starts(pos, AP_EVENT_ENABLED)) {
 		wpa_cli_exec(action_file, ctrl_ifname, pos);

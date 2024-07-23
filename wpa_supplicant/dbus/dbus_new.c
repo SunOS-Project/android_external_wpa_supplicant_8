@@ -1663,7 +1663,8 @@ void wpas_dbus_signal_p2p_group_started(struct wpa_supplicant *wpa_s,
 					      wpa_s->dbus_new_path) ||
 	    !wpa_dbus_dict_append_string(&dict_iter, "role",
 					 client ? "client" : "GO") ||
-	    !wpa_dbus_dict_append_bool(&dict_iter, "persistent", persistent) ||
+	    !wpa_dbus_dict_append_bool(&dict_iter, "persistent",
+				       !!persistent) ||
 	    !wpa_dbus_dict_append_object_path(&dict_iter, "group_object",
 					      wpa_s->dbus_groupobj_path) ||
 	    (ip &&
@@ -4129,6 +4130,11 @@ static const struct wpa_dbus_property_desc wpas_dbus_interface_properties[] = {
 	  NULL,
 	  NULL,
 	},
+	{ "SignalChange", WPAS_DBUS_NEW_IFACE_INTERFACE, "a{sv}",
+	  wpas_dbus_getter_signal_change,
+	  NULL,
+	  NULL
+	},
 	{ NULL, NULL, NULL, NULL, NULL, NULL }
 };
 
@@ -4737,11 +4743,6 @@ static const struct wpa_dbus_property_desc wpas_dbus_p2p_peer_properties[] = {
 	},
 	{ "VSIE", WPAS_DBUS_NEW_IFACE_P2P_PEER, "ay",
 	  wpas_dbus_getter_p2p_peer_vsie,
-	  NULL,
-	  NULL
-	},
-	{ "SignalChange", WPAS_DBUS_NEW_IFACE_INTERFACE, "a{sv}",
-	  wpas_dbus_getter_signal_change,
 	  NULL,
 	  NULL
 	},

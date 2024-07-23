@@ -208,6 +208,9 @@ int hostapd_build_ap_extra_ies(struct hostapd_data *hapd,
 
 	add_buf(&beacon, hapd->conf->vendor_elements);
 	add_buf(&proberesp, hapd->conf->vendor_elements);
+#ifdef CONFIG_TESTING_OPTIONS
+	add_buf(&proberesp, hapd->conf->presp_elements);
+#endif /* CONFIG_TESTING_OPTIONS */
 	add_buf(&assocresp, hapd->conf->assocresp_elements);
 
 	*beacon_ret = beacon;
@@ -624,9 +627,17 @@ int hostapd_get_seqnum(const char *ifname, struct hostapd_data *hapd,
 
 int hostapd_flush(struct hostapd_data *hapd)
 {
+	int link_id = -1;
+
 	if (hapd->driver == NULL || hapd->driver->flush == NULL)
 		return 0;
-	return hapd->driver->flush(hapd->drv_priv);
+
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf && hapd->conf->mld_ap)
+		link_id = hapd->mld_link_id;
+#endif /* CONFIG_IEEE80211BE */
+
+	return hapd->driver->flush(hapd->drv_priv, link_id);
 }
 
 

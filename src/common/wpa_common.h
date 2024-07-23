@@ -17,6 +17,7 @@
 #define PMK_LEN_SUITE_B_192 48
 #define PMK_LEN_MAX 64
 #define WPA_REPLAY_COUNTER_LEN 8
+#define RSN_PN_LEN 6
 #define WPA_NONCE_LEN 32
 #define WPA_KEY_RSC_LEN 8
 #define WPA_GMK_LEN 32
@@ -339,52 +340,54 @@ struct rsn_ie_hdr {
 } STRUCT_PACKED;
 
 
+#define KDE_HDR_LEN (1 + 1 + RSN_SELECTOR_LEN)
+
 struct rsn_error_kde {
 	be16 mui;
 	be16 error_type;
 } STRUCT_PACKED;
 
-#define WPA_IGTK_KDE_PREFIX_LEN (2 + 6)
+#define WPA_IGTK_KDE_PREFIX_LEN (2 + RSN_PN_LEN)
 struct wpa_igtk_kde {
 	u8 keyid[2];
-	u8 pn[6];
+	u8 pn[RSN_PN_LEN];
 	u8 igtk[WPA_IGTK_MAX_LEN];
 } STRUCT_PACKED;
 
-#define WPA_BIGTK_KDE_PREFIX_LEN (2 + 6)
+#define WPA_BIGTK_KDE_PREFIX_LEN (2 + RSN_PN_LEN)
 struct wpa_bigtk_kde {
 	u8 keyid[2];
-	u8 pn[6];
+	u8 pn[RSN_PN_LEN];
 	u8 bigtk[WPA_BIGTK_MAX_LEN];
 } STRUCT_PACKED;
 
-#define RSN_MLO_GTK_KDE_PREFIX_LENGTH		(1 + 6)
+#define RSN_MLO_GTK_KDE_PREFIX_LENGTH		(1 + RSN_PN_LEN)
 #define RSN_MLO_GTK_KDE_PREFIX0_KEY_ID_MASK	0x03
 #define RSN_MLO_GTK_KDE_PREFIX0_TX		0x04
 #define RSN_MLO_GTK_KDE_PREFIX0_LINK_ID_SHIFT	4
 #define RSN_MLO_GTK_KDE_PREFIX0_LINK_ID_MASK	0xF0
 
-#define RSN_MLO_IGTK_KDE_PREFIX_LENGTH		(2 + 6 + 1)
+#define RSN_MLO_IGTK_KDE_PREFIX_LENGTH		(2 + RSN_PN_LEN + 1)
 #define RSN_MLO_IGTK_KDE_PREFIX8_LINK_ID_SHIFT	4
 #define RSN_MLO_IGTK_KDE_PREFIX8_LINK_ID_MASK	0xF0
 struct rsn_mlo_igtk_kde {
 	u8 keyid[2];
-	u8 pn[6];
+	u8 pn[RSN_PN_LEN];
 	u8 prefix8;
 	u8 igtk[WPA_IGTK_MAX_LEN];
 } STRUCT_PACKED;
 
-#define RSN_MLO_BIGTK_KDE_PREFIX_LENGTH		(2 + 6 + 1)
+#define RSN_MLO_BIGTK_KDE_PREFIX_LENGTH		(2 + RSN_PN_LEN + 1)
 #define RSN_MLO_BIGTK_KDE_PREFIX8_LINK_ID_SHIFT	4
 #define RSN_MLO_BIGTK_KDE_PREFIX8_LINK_ID_MASK	0xF0
 struct rsn_mlo_bigtk_kde {
 	u8 keyid[2];
-	u8 pn[6];
+	u8 pn[RSN_PN_LEN];
 	u8 prefix8;
 	u8 bigtk[WPA_BIGTK_MAX_LEN];
 } STRUCT_PACKED;
 
-#define RSN_MLO_LINK_KDE_FIXED_LENGTH		(1 + 6)
+#define RSN_MLO_LINK_KDE_FIXED_LENGTH		(1 + ETH_ALEN)
 #define RSN_MLO_LINK_KDE_LINK_INFO_INDEX	0
 #define RSN_MLO_LINK_KDE_LI_LINK_ID_SHIFT	0
 #define RSN_MLO_LINK_KDE_LI_LINK_ID_MASK	0x0F
@@ -696,6 +699,8 @@ struct wpa_eapol_ie_parse {
 	size_t supp_channels_len;
 	const u8 *supp_oper_classes;
 	size_t supp_oper_classes_len;
+	const u8 *ssid;
+	size_t ssid_len;
 	u8 qosinfo;
 	u16 aid;
 	const u8 *wmm;

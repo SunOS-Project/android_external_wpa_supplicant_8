@@ -140,6 +140,14 @@ static int ieee802_11_parse_vendor_specific(const u8 *pos, size_t elen,
 			elems->sae_pk = pos + 4;
 			elems->sae_pk_len = elen - 4;
 			break;
+		case WFA_RSNE_OVERRIDE_OUI_TYPE:
+			elems->rsne_override = pos;
+			elems->rsne_override_len = elen;
+			break;
+		case WFA_RSNE_OVERRIDE_2_OUI_TYPE:
+			elems->rsne_override_2 = pos;
+			elems->rsne_override_2_len = elen;
+			break;
 		case P2P2_OUI_TYPE:
 			/* Wi-Fi Alliance - P2P2 IE */
 			elems->p2p2_ie = pos;
@@ -623,6 +631,12 @@ static ParseRes __ieee802_11_parse_elems(const u8 *start, size_t len,
 		case WLAN_EID_RRM_ENABLED_CAPABILITIES:
 			elems->rrm_enabled = pos;
 			elems->rrm_enabled_len = elen;
+			break;
+		case WLAN_EID_MULTIPLE_BSSID:
+			if (elen < 1)
+				break;
+			elems->mbssid = pos;
+			elems->mbssid_len = elen;
 			break;
 		case WLAN_EID_CAG_NUMBER:
 			elems->cag_number = pos;
@@ -1506,8 +1520,6 @@ ieee80211_freq_to_channel_ext(unsigned int freq, int sec_channel,
 			*op_class = 126;
 		else if (sec_channel == -1)
 			*op_class = 127;
-		else if (freq <= 5805)
-			*op_class = 124;
 		else
 			*op_class = 125;
 
@@ -3139,8 +3151,12 @@ bool ieee802_11_rsnx_capab_len(const u8 *rsnxe, size_t rsnxe_len,
 
 bool ieee802_11_rsnx_capab(const u8 *rsnxe, unsigned int capab)
 {
-	return ieee802_11_rsnx_capab_len(rsnxe ? rsnxe + 2 : NULL,
-					 rsnxe ? rsnxe[1] : 0, capab);
+	if (!rsnxe)
+		return false;
+	if (rsnxe[0] == WLAN_EID_VENDOR_SPECIFIC && rsnxe[1] >= 4 + 1)
+		return ieee802_11_rsnx_capab_len(rsnxe + 2 + 4, rsnxe[1] - 4,
+						 capab);
+	return ieee802_11_rsnx_capab_len(rsnxe + 2, rsnxe[1], capab);
 }
 
 

@@ -1397,6 +1397,23 @@ struct wowlan_triggers {
 	u8 rfkill_release;
 };
 
+struct unsol_bcast_probe_resp {
+	/**
+	 * Unsolicited broadcast Probe Response interval in TUs
+	 */
+	unsigned int unsol_bcast_probe_resp_interval;
+
+	/**
+	 * Unsolicited broadcast Probe Response template data
+	 */
+	u8 *unsol_bcast_probe_resp_tmpl;
+
+	/**
+	 * Unsolicited broadcast Probe Response template length
+	 */
+	size_t unsol_bcast_probe_resp_tmpl_len;
+};
+
 struct wpa_driver_ap_params {
 	/**
 	 * head - Beacon head from IEEE 802.11 header to IEs before TIM IE
@@ -1740,21 +1757,6 @@ struct wpa_driver_ap_params {
 	size_t fd_frame_tmpl_len;
 
 	/**
-	 * Unsolicited broadcast Probe Response interval in TUs
-	 */
-	unsigned int unsol_bcast_probe_resp_interval;
-
-	/**
-	 * Unsolicited broadcast Probe Response template data
-	 */
-	u8 *unsol_bcast_probe_resp_tmpl;
-
-	/**
-	 * Unsolicited broadcast Probe Response template length
-	 */
-	size_t unsol_bcast_probe_resp_tmpl_len;
-
-	/**
 	 * mbssid_tx_iface - Transmitting interface of the MBSSID set
 	 */
 	const char *mbssid_tx_iface;
@@ -1819,6 +1821,9 @@ struct wpa_driver_ap_params {
 	 * The driver will use these to include RNR elements in EMA beacons.
 	 */
 	u8 **rnr_elem_offset;
+
+	/* Unsolicited broadcast Probe Response data */
+	struct unsol_bcast_probe_resp ubpr;
 
 	/**
 	 * allowed_freqs - List of allowed 20 MHz channel center frequencies in
@@ -2336,6 +2341,8 @@ struct wpa_driver_capa {
 #define WPA_DRIVER_FLAGS2_SAE_OFFLOAD_AP	0x0000000000100000ULL
 /** Driver supports TWT responder in HT and VHT modes */
 #define WPA_DRIVER_FLAGS2_HT_VHT_TWT_RESPONDER	0x0000000000200000ULL
+/** Driver supports RSN override elements */
+#define WPA_DRIVER_FLAGS2_RSN_OVERRIDE_STA	0x0000000000400000ULL
 /** Driver supports NAN offload */
 #define WPA_DRIVER_FLAGS2_NAN_OFFLOAD		0x0000000000800000ULL
 	u64 flags2;
@@ -2742,6 +2749,7 @@ struct beacon_data {
  * @counter_offset_presp: Offset to the count field in probe resp.
  * @punct_bitmap - Preamble puncturing bitmap
  * @link_id: Link ID to determine the link for MLD; -1 for non-MLD
+ * @ubpr: Unsolicited broadcast Probe Response frame data
  */
 struct csa_settings {
 	u8 cs_count;
@@ -2756,6 +2764,8 @@ struct csa_settings {
 
 	u16 punct_bitmap;
 	int link_id;
+
+	struct unsol_bcast_probe_resp ubpr;
 };
 
 /**
@@ -2767,6 +2777,8 @@ struct csa_settings {
  * @beacon_after: Next Beacon/Probe Response/(Re)Association Response frame info
  * @counter_offset_beacon: Offset to the count field in Beacon frame tail
  * @counter_offset_presp: Offset to the count field in Probe Response frame
+ * @ubpr: Unsolicited broadcast Probe Response frame data
+ * @link_id: If >= 0 indicates the link of the AP MLD to configure
  */
 struct cca_settings {
 	u8 cca_count;
@@ -2777,6 +2789,10 @@ struct cca_settings {
 
 	u16 counter_offset_beacon;
 	u16 counter_offset_presp;
+
+	struct unsol_bcast_probe_resp ubpr;
+
+	int link_id;
 };
 
 /* TDLS peer capabilities for send_tdls_mgmt() */
@@ -3606,13 +3622,15 @@ struct wpa_driver_ops {
 	/**
 	 * flush - Flush all association stations (AP only)
 	 * @priv: Private driver interface data
+	 * @link_id: In case of MLO, valid link ID on which all associated
+	 *	stations will be flushed, -1 otherwise.
 	 * Returns: 0 on success, -1 on failure
 	 *
 	 * This function requests the driver to disassociate all associated
 	 * stations. This function does not need to be implemented if the
 	 * driver does not process association frames internally.
 	 */
-	int (*flush)(void *priv);
+	int (*flush)(void *priv, int link_id);
 
 	/**
 	 * set_generic_elem - Add IEs into Beacon/Probe Response frames (AP)
@@ -6445,6 +6463,14 @@ union wpa_event_data {
 		void *drv_priv;
 
 		/**
+		 * ctx - Pointer to store ctx of private BSS information
+		 *
+		 * If not set to NULL, this is used for forwarding the packet
+		 * to right link BSS of ML BSS.
+		 */
+		void *ctx;
+
+		/**
 		 * freq - Frequency (in MHz) on which the frame was received
 		 */
 		int freq;
@@ -6864,6 +6890,7 @@ union wpa_event_data {
 	 */
 	struct bss_color_collision {
 		u64 bitmap;
+		int link_id;
 	} bss_color_collision;
 
 	/**
