@@ -510,7 +510,9 @@ int hostapd_setup_sae_pt(struct hostapd_bss_config *conf)
 
 	if (!groups) {
 		groups = default_groups;
-		if (wpa_key_mgmt_sae_ext_key(conf->wpa_key_mgmt))
+		if (wpa_key_mgmt_sae_ext_key(conf->wpa_key_mgmt |
+					     conf->rsn_override_key_mgmt |
+					     conf->rsn_override_key_mgmt_2))
 			default_groups[1] = 20;
 	}
 
@@ -972,6 +974,11 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 
 #ifdef CONFIG_TESTING_OPTIONS
 	wpabuf_free(conf->own_ie_override);
+	wpabuf_free(conf->rsne_override);
+	wpabuf_free(conf->rsnoe_override);
+	wpabuf_free(conf->rsno2e_override);
+	wpabuf_free(conf->rsnxe_override);
+	wpabuf_free(conf->rsnxoe_override);
 	wpabuf_free(conf->sae_commit_override);
 	wpabuf_free(conf->rsne_override_eapol);
 	wpabuf_free(conf->rsnxe_override_eapol);

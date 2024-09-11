@@ -1268,6 +1268,17 @@ int hostapd_drv_set_secure_ranging_ctx(struct hostapd_data *hapd,
 #endif /* CONFIG_PASN */
 
 
+struct hostapd_multi_hw_info *
+hostapd_get_multi_hw_info(struct hostapd_data *hapd,
+			  unsigned int *num_multi_hws)
+{
+	if (!hapd->driver || !hapd->driver->get_multi_hw_info)
+		return NULL;
+
+	return hapd->driver->get_multi_hw_info(hapd->drv_priv, num_multi_hws);
+}
+
+
 int hostapd_drv_add_pmkid(struct hostapd_data *hapd,
 			  struct wpa_pmkid_params *params)
 {

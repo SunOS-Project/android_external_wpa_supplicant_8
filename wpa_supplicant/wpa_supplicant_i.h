@@ -1346,13 +1346,15 @@ struct wpa_supplicant {
 	u8 *mac_addr_pno;
 
 #ifdef CONFIG_WNM
+	bool wnm_transition_scan;
 	u8 wnm_dialog_token;
 	u8 wnm_reply;
 	u8 wnm_num_neighbor_report;
 	u8 wnm_mode;
 	bool wnm_link_removal;
-	u8 wnm_dissoc_addr[ETH_ALEN];
-	u16 wnm_dissoc_timer;
+	bool wnm_disassoc_mld;
+	u8 wnm_disassoc_addr[ETH_ALEN];
+	u16 wnm_disassoc_timer;
 	u8 wnm_bss_termination_duration[12];
 	struct neighbor_report *wnm_neighbor_report_elements;
 	struct os_reltime wnm_cand_valid_until;
@@ -1629,6 +1631,7 @@ struct wpa_supplicant {
 	bool wps_scan_done; /* Set upon receiving scan results event */
 	bool supp_pbc_active; /* Set for interface when PBC is triggered */
 	bool wps_overlap;
+	bool scan_in_progress_6ghz; /* Set upon a 6 GHz scan being triggered */
 
 #ifdef CONFIG_PASN
 	struct pasn_data pasn;
@@ -2082,5 +2085,7 @@ bool wpas_ap_supports_rsn_overriding(struct wpa_supplicant *wpa_s,
 				     struct wpa_bss *bss);
 bool wpas_ap_supports_rsn_overriding_2(struct wpa_supplicant *wpa_s,
 				       struct wpa_bss *bss);
+int wpas_get_owe_trans_network(const u8 *owe_ie, const u8 **bssid,
+			       const u8 **ssid, size_t *ssid_len);
 
 #endif /* WPA_SUPPLICANT_I_H */

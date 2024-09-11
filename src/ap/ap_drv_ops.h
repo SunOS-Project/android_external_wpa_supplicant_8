@@ -483,6 +483,10 @@ static inline int hostapd_drv_link_sta_remove(struct hostapd_data *hapd,
 
 #endif /* CONFIG_IEEE80211BE */
 
+struct hostapd_multi_hw_info *
+hostapd_get_multi_hw_info(struct hostapd_data *hapd,
+			  unsigned int *num_multi_hws);
+
 int hostapd_drv_add_pmkid(struct hostapd_data *hapd,
 			  struct wpa_pmkid_params *params);
 int hostapd_add_pmkid(struct hostapd_data *hapd, const u8 *bssid, const u8 *pmk,
