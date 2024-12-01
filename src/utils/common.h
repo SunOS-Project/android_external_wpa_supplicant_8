@@ -110,6 +110,8 @@ typedef INT8 s8;
 #define WPA_TYPES_DEFINED
 #endif /* __vxworks */
 
+#include <stdbool.h>
+
 #ifndef WPA_TYPES_DEFINED
 #ifdef CONFIG_USE_INTTYPES_H
 #include <inttypes.h>
