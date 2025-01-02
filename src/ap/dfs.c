@@ -14,6 +14,7 @@
 #include "common/hw_features_common.h"
 #include "common/wpa_ctrl.h"
 #include "hostapd.h"
+#include "beacon.h"
 #include "ap_drv_ops.h"
 #include "drivers/driver.h"
 #include "dfs.h"
@@ -188,7 +189,7 @@ static int dfs_chan_range_available(struct hostapd_hw_modes *mode,
 	 * If it's not allowed to use the first channel as primary, decline the
 	 * whole channel range. */
 	if (!chan_pri_allowed(first_chan)) {
-		wpa_printf(MSG_DEBUG, "DFS: primary chanenl not allowed");
+		wpa_printf(MSG_DEBUG, "DFS: primary channel not allowed");
 		return 0;
 	}
 
@@ -251,6 +252,13 @@ static int dfs_find_channel(struct hostapd_iface *iface,
 	wpa_printf(MSG_DEBUG, "DFS new chan checking %d channels", n_chans);
 	for (i = 0; i < mode->num_channels; i++) {
 		chan = &mode->channels[i];
+
+		if (!chan_in_current_hw_info(iface->current_hw_info, chan)) {
+			wpa_printf(MSG_DEBUG,
+				   "DFS: channel %d (%d) is not under current hardware index",
+				   chan->freq, chan->chan);
+			continue;
+		}
 
 		/* Skip HT40/VHT incompatible channels */
 		if (iface->conf->ieee80211n &&
@@ -551,6 +559,8 @@ dfs_get_valid_channel(struct hostapd_iface *iface,
 	if (os_get_random((u8 *) &_rand, sizeof(_rand)) < 0)
 		return NULL;
 	chan_idx = _rand % num_available_chandefs;
+	wpa_printf(MSG_DEBUG, "DFS: Picked random entry from the list: %d/%d",
+		   chan_idx, num_available_chandefs);
 	dfs_find_channel(iface, &chan, chan_idx, type);
 	if (!chan) {
 		wpa_printf(MSG_DEBUG, "DFS: no random channel found");
@@ -970,6 +980,7 @@ static int hostapd_dfs_request_channel_switch(struct hostapd_iface *iface,
 	struct csa_settings csa_settings;
 	u8 new_vht_oper_chwidth;
 	unsigned int i;
+	unsigned int num_err = 0;
 
 	wpa_printf(MSG_DEBUG, "DFS will switch to a new channel %d", channel);
 	wpa_msg(iface->bss[0]->msg_ctx, MSG_INFO, DFS_EVENT_NEW_CHANNEL
@@ -1007,7 +1018,8 @@ static int hostapd_dfs_request_channel_switch(struct hostapd_iface *iface,
 				      oper_centr_freq_seg1_idx,
 				      cmode->vht_capab,
 				      &cmode->he_capab[ieee80211_mode],
-				      &cmode->eht_capab[ieee80211_mode]);
+				      &cmode->eht_capab[ieee80211_mode],
+				      hostapd_get_punct_bitmap(iface->bss[0]));
 
 	if (err) {
 		wpa_printf(MSG_ERROR,
@@ -1019,10 +1031,10 @@ static int hostapd_dfs_request_channel_switch(struct hostapd_iface *iface,
 	for (i = 0; i < iface->num_bss; i++) {
 		err = hostapd_switch_channel(iface->bss[i], &csa_settings);
 		if (err)
-			break;
+			num_err++;
 	}
 
-	if (err) {
+	if (num_err == iface->num_bss) {
 		wpa_printf(MSG_WARNING,
 			   "DFS failed to schedule CSA (%d) - trying fallback",
 			   err);
@@ -1049,7 +1061,7 @@ static int hostapd_dfs_request_channel_switch(struct hostapd_iface *iface,
 }
 
 
-static void hostpad_dfs_update_background_chain(struct hostapd_iface *iface)
+static void hostapd_dfs_update_background_chain(struct hostapd_iface *iface)
 {
 	int sec = 0;
 	enum dfs_channel_type channel_type = DFS_NO_CAC_YET;
@@ -1124,7 +1136,7 @@ hostapd_dfs_start_channel_switch_background(struct hostapd_iface *iface)
 	hostapd_set_oper_centr_freq_seg1_idx(
 		iface->conf, iface->radar_background.centr_freq_seg1_idx);
 
-	hostpad_dfs_update_background_chain(iface);
+	hostapd_dfs_update_background_chain(iface);
 
 	return hostapd_dfs_request_channel_switch(
 		iface, iface->conf->channel, iface->freq,
@@ -1139,14 +1151,23 @@ int hostapd_dfs_complete_cac(struct hostapd_iface *iface, int success, int freq,
 			     int cf1, int cf2)
 {
 	wpa_msg(iface->bss[0]->msg_ctx, MSG_INFO, DFS_EVENT_CAC_COMPLETED
-		"success=%d freq=%d ht_enabled=%d chan_offset=%d chan_width=%d cf1=%d cf2=%d",
-		success, freq, ht_enabled, chan_offset, chan_width, cf1, cf2);
+		"success=%d freq=%d ht_enabled=%d chan_offset=%d chan_width=%d cf1=%d cf2=%d radar_detected=%d",
+		success, freq, ht_enabled, chan_offset, chan_width, cf1, cf2,
+		iface->radar_detected);
 
 	if (success) {
 		/* Complete iface/ap configuration */
 		if (iface->drv_flags & WPA_DRIVER_FLAGS_DFS_OFFLOAD) {
-			/* Complete AP configuration for the first bring up. */
-			if (iface->state != HAPD_IFACE_ENABLED)
+			/* Complete AP configuration for the first bring up. If
+			 * a radar was detected in this channel, interface setup
+			 * will be handled in
+			 * 1. hostapd_event_ch_switch() if switching to a
+			 *    non-DFS channel
+			 * 2. on next CAC complete event if switching to another
+			 *    DFS channel.
+			 */
+			if (iface->state != HAPD_IFACE_ENABLED &&
+			    !iface->radar_detected)
 				hostapd_setup_interface_complete(iface, 0);
 			else
 				iface->cac_started = 0;
@@ -1188,9 +1209,10 @@ int hostapd_dfs_complete_cac(struct hostapd_iface *iface, int success, int freq,
 		}
 	} else if (hostapd_dfs_is_background_event(iface, freq)) {
 		iface->radar_background.cac_started = 0;
-		hostpad_dfs_update_background_chain(iface);
+		hostapd_dfs_update_background_chain(iface);
 	}
 
+	iface->radar_detected = false;
 	return 0;
 }
 
@@ -1322,7 +1344,7 @@ hostapd_dfs_background_start_channel_switch(struct hostapd_iface *iface,
 		 * Just select a new random channel according to the
 		 * regulations for monitoring.
 		 */
-		hostpad_dfs_update_background_chain(iface);
+		hostapd_dfs_update_background_chain(iface);
 		return 0;
 	}
 
@@ -1434,6 +1456,8 @@ int hostapd_dfs_radar_detected(struct hostapd_iface *iface, int freq,
 		"freq=%d ht_enabled=%d chan_offset=%d chan_width=%d cf1=%d cf2=%d",
 		freq, ht_enabled, chan_offset, chan_width, cf1, cf2);
 
+	iface->radar_detected = true;
+
 	/* Proceed only if DFS is not offloaded to the driver */
 	if (iface->drv_flags & WPA_DRIVER_FLAGS_DFS_OFFLOAD)
 		return 0;
@@ -1484,7 +1508,7 @@ int hostapd_dfs_nop_finished(struct hostapd_iface *iface, int freq,
 	} else if (dfs_use_radar_background(iface) &&
 		   iface->radar_background.channel == -1) {
 		/* Reset radar background chain if disabled */
-		hostpad_dfs_update_background_chain(iface);
+		hostapd_dfs_update_background_chain(iface);
 	}
 
 	return 0;
@@ -1527,9 +1551,17 @@ int hostapd_dfs_start_cac(struct hostapd_iface *iface, int freq,
 		iface->radar_background.cac_started = 1;
 	} else {
 		/* This is called when the driver indicates that an offloaded
-		 * DFS has started CAC. */
+		 * DFS has started CAC. radar_detected might be set for previous
+		 * DFS channel. Clear it for this new CAC process. */
 		hostapd_set_state(iface, HAPD_IFACE_DFS);
 		iface->cac_started = 1;
+
+		/* Clear radar_detected in case it is for the previous
+		 * frequency. Also remove disabled link's information in RNR
+		 * element from other links. */
+		iface->radar_detected = false;
+		if (iface->interfaces && iface->interfaces->count > 1)
+			ieee802_11_set_beacons(iface);
 	}
 	/* TODO: How to check CAC time for ETSI weather channels? */
 	iface->dfs_cac_ms = 60000;

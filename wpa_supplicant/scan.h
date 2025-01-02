@@ -88,8 +88,6 @@ int wpas_mac_addr_rand_scan_set(struct wpa_supplicant *wpa_s,
 int wpas_mac_addr_rand_scan_get_mask(struct wpa_supplicant *wpa_s,
 				     unsigned int type, u8 *mask);
 int wpas_abort_ongoing_scan(struct wpa_supplicant *wpa_s);
-void filter_scan_res(struct wpa_supplicant *wpa_s,
-		     struct wpa_scan_results *res);
 void scan_snr(struct wpa_scan_res *res);
 void scan_est_throughput(struct wpa_supplicant *wpa_s,
 			 struct wpa_scan_res *res);
@@ -106,5 +104,8 @@ int wpas_channel_width_rssi_bump(const u8 *ies, size_t ies_len,
 				 enum chan_width cw);
 int wpas_adjust_snr_by_chanwidth(const u8 *ies, size_t ies_len,
 				 enum chan_width max_cw, int snr);
+void wpa_add_owe_scan_ssid(struct wpa_supplicant *wpa_s,
+			   struct wpa_driver_scan_params *params,
+			   const struct wpa_ssid *ssid, size_t max_ssids);
 
 #endif /* SCAN_H */

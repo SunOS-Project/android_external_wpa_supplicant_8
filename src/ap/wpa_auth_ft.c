@@ -2366,7 +2366,8 @@ static u8 * wpa_ft_igtk_subelem(struct wpa_state_machine *sm, size_t *len)
 static u8 * wpa_ft_bigtk_subelem(struct wpa_state_machine *sm, size_t *len)
 {
 	u8 *subelem, *pos;
-	struct wpa_group *gsm = sm->group;
+	struct wpa_authenticator *wpa_auth = sm->wpa_auth;
+	struct wpa_group *gsm = wpa_auth->group;
 	size_t subelem_len;
 	const u8 *kek, *bigtk;
 	size_t kek_len;
@@ -2381,7 +2382,7 @@ static u8 * wpa_ft_bigtk_subelem(struct wpa_state_machine *sm, size_t *len)
 		kek_len = sm->PTK.kek_len;
 	}
 
-	bigtk_len = wpa_cipher_key_len(sm->wpa_auth->conf.group_mgmt_cipher);
+	bigtk_len = wpa_cipher_key_len(wpa_auth->conf.group_mgmt_cipher);
 
 	/* Sub-elem ID[1] | Length[1] | KeyID[2] | BIPN[6] | Key Length[1] |
 	 * Key[16+8] */
@@ -2395,7 +2396,7 @@ static u8 * wpa_ft_bigtk_subelem(struct wpa_state_machine *sm, size_t *len)
 	*pos++ = subelem_len - 2;
 	WPA_PUT_LE16(pos, gsm->GN_bigtk);
 	pos += 2;
-	wpa_auth_get_seqnum(sm->wpa_auth, NULL, gsm->GN_bigtk, pos);
+	wpa_auth_get_seqnum(wpa_auth, NULL, gsm->GN_bigtk, pos);
 	pos += 6;
 	*pos++ = bigtk_len;
 	bigtk = gsm->BIGTK[gsm->GN_bigtk - 6];
@@ -3441,9 +3442,9 @@ out:
 }
 
 
-void wpa_ft_process_auth(struct wpa_state_machine *sm, const u8 *bssid,
+void wpa_ft_process_auth(struct wpa_state_machine *sm,
 			 u16 auth_transaction, const u8 *ies, size_t ies_len,
-			 void (*cb)(void *ctx, const u8 *dst, const u8 *bssid,
+			 void (*cb)(void *ctx, const u8 *dst,
 				    u16 auth_transaction, u16 status,
 				    const u8 *ies, size_t ies_len),
 			 void *ctx)
@@ -3461,7 +3462,8 @@ void wpa_ft_process_auth(struct wpa_state_machine *sm, const u8 *bssid,
 
 	wpa_printf(MSG_DEBUG, "FT: Received authentication frame: STA=" MACSTR
 		   " BSSID=" MACSTR " transaction=%d",
-		   MAC2STR(sm->addr), MAC2STR(bssid), auth_transaction);
+		   MAC2STR(sm->addr), MAC2STR(sm->wpa_auth->addr),
+		   auth_transaction);
 	sm->ft_pending_cb = cb;
 	sm->ft_pending_cb_ctx = ctx;
 	sm->ft_pending_auth_transaction = auth_transaction;
@@ -3479,8 +3481,7 @@ void wpa_ft_process_auth(struct wpa_state_machine *sm, const u8 *bssid,
 		   MAC2STR(sm->addr), auth_transaction + 1, status,
 		   status2str(status));
 	wpa_hexdump(MSG_DEBUG, "FT: Response IEs", resp_ies, resp_ies_len);
-	cb(ctx, sm->addr, bssid, auth_transaction + 1, status,
-	   resp_ies, resp_ies_len);
+	cb(ctx, sm->addr, auth_transaction + 1, status, resp_ies, resp_ies_len);
 	os_free(resp_ies);
 }
 
@@ -3809,7 +3810,7 @@ int wpa_ft_action_rx(struct wpa_state_machine *sm, const u8 *data, size_t len)
 }
 
 
-static void wpa_ft_rrb_rx_request_cb(void *ctx, const u8 *dst, const u8 *bssid,
+static void wpa_ft_rrb_rx_request_cb(void *ctx, const u8 *dst,
 				     u16 auth_transaction, u16 resp,
 				     const u8 *ies, size_t ies_len)
 {
@@ -4338,7 +4339,7 @@ static void ft_finish_pull(struct wpa_state_machine *sm)
 	wpa_printf(MSG_DEBUG, "FT: Postponed auth callback result for " MACSTR
 		   " - status %u", MAC2STR(sm->addr), status);
 
-	sm->ft_pending_cb(sm->ft_pending_cb_ctx, sm->addr, sm->wpa_auth->addr,
+	sm->ft_pending_cb(sm->ft_pending_cb_ctx, sm->addr,
 			  sm->ft_pending_auth_transaction + 1, status,
 			  resp_ies, resp_ies_len);
 	os_free(resp_ies);

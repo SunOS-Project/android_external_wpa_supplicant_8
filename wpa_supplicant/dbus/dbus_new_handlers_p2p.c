@@ -14,6 +14,7 @@
 #include "../wpa_supplicant_i.h"
 #include "../wps_supplicant.h"
 #include "../notify.h"
+#include "../bss.h"
 #include "dbus_new_helpers.h"
 #include "dbus_new.h"
 #include "dbus_new_handlers.h"
@@ -167,6 +168,13 @@ DBusMessage * wpas_dbus_handler_p2p_find(DBusMessage *message,
 			goto error_clear;
 		wpa_dbus_dict_entry_clear(&entry);
 	}
+
+	max_oper_chwidth = chwidth_freq2_to_ch_width(chwidth, freq2);
+	if (max_oper_chwidth < 0)
+		goto inv_args;
+
+	if (allow_6ghz && chwidth == 40)
+		max_oper_chwidth = CONF_OPER_CHWIDTH_40MHZ_6GHZ;
 
 	wpa_s = wpa_s->global->p2p_init_wpa_s;
 	if (!wpa_s) {
@@ -472,7 +480,7 @@ DBusMessage * wpas_dbus_handler_p2p_group_add(DBusMessage *message,
 		if (ssid == NULL || ssid->disabled != 2)
 			goto inv_args;
 
-		if (wpas_p2p_group_add_persistent(wpa_s, ssid, 0, freq, 0,
+		if (wpas_p2p_group_add_persistent(wpa_s, ssid, 0, freq, freq,
 						  freq2, ht40, vht,
 						  max_oper_chwidth, he, edmg,
 						  NULL, 0, 0, allow_6ghz,
@@ -2465,9 +2473,9 @@ dbus_bool_t wpas_dbus_getter_p2p_group_bssid(
 	u8 *p_bssid;
 
 	if (role == WPAS_P2P_ROLE_CLIENT) {
-		if (wpa_s->current_ssid == NULL)
+		if (!wpa_s->current_bss)
 			return FALSE;
-		p_bssid = wpa_s->current_ssid->bssid;
+		p_bssid = wpa_s->current_bss->bssid;
 	} else {
 		if (wpa_s->ap_iface == NULL)
 			return FALSE;
@@ -2489,9 +2497,9 @@ dbus_bool_t wpas_dbus_getter_p2p_group_frequency(
 	u8 role = wpas_get_p2p_role(wpa_s);
 
 	if (role == WPAS_P2P_ROLE_CLIENT) {
-		if (wpa_s->go_params == NULL)
+		if (!wpa_s->current_bss)
 			return FALSE;
-		op_freq = wpa_s->go_params->freq;
+		op_freq = wpa_s->current_bss->freq;
 	} else {
 		if (wpa_s->ap_iface == NULL)
 			return FALSE;
@@ -2778,20 +2786,20 @@ DBusMessage * wpas_dbus_handler_p2p_add_service(DBusMessage *message,
 
 		if (wpas_p2p_service_add_bonjour(wpa_s, query, resp) < 0)
 			goto error;
-		query = NULL;
-		resp = NULL;
 	} else
 		goto error;
 
+out:
 	os_free(service);
+	wpabuf_free(query);
+	wpabuf_free(resp);
+
 	return reply;
 error_clear:
 	wpa_dbus_dict_entry_clear(&entry);
 error:
-	os_free(service);
-	wpabuf_free(query);
-	wpabuf_free(resp);
-	return wpas_dbus_error_invalid_args(message, NULL);
+	reply = wpas_dbus_error_invalid_args(message, NULL);
+	goto out;
 }
 
 
@@ -2925,6 +2933,7 @@ DBusMessage * wpas_dbus_handler_p2p_service_sd_req(
 			if (entry.type != DBUS_TYPE_ARRAY ||
 			    entry.array_type != DBUS_TYPE_BYTE)
 				goto error_clear;
+			wpabuf_free(tlv);
 			tlv = wpabuf_alloc_copy(entry.bytearray_value,
 						entry.array_len);
 		} else
@@ -2952,7 +2961,6 @@ DBusMessage * wpas_dbus_handler_p2p_service_sd_req(
 		if (tlv == NULL)
 			goto error;
 		ref = wpas_p2p_sd_request(wpa_s, addr, tlv);
-		wpabuf_free(tlv);
 	}
 
 	if (ref != 0) {
@@ -2964,14 +2972,13 @@ DBusMessage * wpas_dbus_handler_p2p_service_sd_req(
 			message, "Unable to send SD request");
 	}
 out:
+	wpabuf_free(tlv);
 	os_free(service);
 	os_free(peer_object_path);
 	return reply;
 error_clear:
 	wpa_dbus_dict_entry_clear(&entry);
 error:
-	if (tlv)
-		wpabuf_free(tlv);
 	reply = wpas_dbus_error_invalid_args(message, NULL);
 	goto out;
 }
@@ -3013,6 +3020,7 @@ DBusMessage * wpas_dbus_handler_p2p_service_sd_res(
 			if (entry.type != DBUS_TYPE_ARRAY ||
 			    entry.array_type != DBUS_TYPE_BYTE)
 				goto error_clear;
+			wpabuf_free(tlv);
 			tlv = wpabuf_alloc_copy(entry.bytearray_value,
 						entry.array_len);
 		} else
@@ -3026,8 +3034,8 @@ DBusMessage * wpas_dbus_handler_p2p_service_sd_res(
 		goto error;
 
 	wpas_p2p_sd_response(wpa_s, freq, addr, (u8) dlg_tok, tlv);
-	wpabuf_free(tlv);
 out:
+	wpabuf_free(tlv);
 	os_free(peer_object_path);
 	return reply;
 error_clear:

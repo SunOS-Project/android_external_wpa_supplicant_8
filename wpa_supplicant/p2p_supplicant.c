@@ -1105,6 +1105,8 @@ static int wpas_p2p_group_delete(struct wpa_supplicant *wpa_s,
 
 	os_memset(wpa_s->go_dev_addr, 0, ETH_ALEN);
 
+	wpa_s->p2p_go_no_pri_sec_switch = 0;
+
 	return 0;
 }
 
@@ -5293,6 +5295,7 @@ static int wpas_p2p_get_pref_freq_list(void *ctx, int go,
 					  WPA_IF_P2P_CLIENT, len, freq_list);
 }
 
+
 static void wpas_p2p_send_bootstrap_comeback(void *eloop_ctx, void *timeout_ctx)
 {
 	struct wpa_supplicant *wpa_s = eloop_ctx;
@@ -7834,7 +7837,8 @@ int wpas_p2p_group_add(struct wpa_supplicant *wpa_s, int persistent_group,
 			return -1;
 	}
 
-	if (wpas_p2p_init_go_params(wpa_s, &params, selected_freq, vht_center_freq2,
+	if (wpas_p2p_init_go_params(wpa_s, &params, selected_freq,
+				    vht_center_freq2,
 				    ht40, vht, max_oper_chwidth, he, edmg,
 				    NULL))
 		return -1;
@@ -8384,9 +8388,10 @@ int wpas_p2p_scan_result_text(const u8 *ies, size_t ies_len, char *buf,
 }
 
 
-static void wpas_p2p_clear_pending_action_tx(struct wpa_supplicant *wpa_s)
+static void wpas_p2p_clear_pending_action_tx(struct wpa_supplicant *wpa_s,
+					     bool force)
 {
-	if (!offchannel_pending_action_tx(wpa_s))
+	if (!offchannel_pending_action_tx(wpa_s) && !force)
 		return;
 
 	if (wpa_s->p2p_send_action_work) {
@@ -8396,6 +8401,8 @@ static void wpas_p2p_clear_pending_action_tx(struct wpa_supplicant *wpa_s)
 		offchannel_send_action_done(wpa_s);
 	}
 
+	if (!offchannel_pending_action_tx(wpa_s))
+		return;
 	wpa_printf(MSG_DEBUG, "P2P: Drop pending Action TX due to new "
 		   "operation request");
 	offchannel_clear_pending_action_tx(wpa_s);
@@ -8409,7 +8416,7 @@ int wpas_p2p_find(struct wpa_supplicant *wpa_s, unsigned int timeout,
 		  u8 seek_cnt, const char **seek_string, int freq,
 		  bool include_6ghz)
 {
-	wpas_p2p_clear_pending_action_tx(wpa_s);
+	wpas_p2p_clear_pending_action_tx(wpa_s, false);
 	wpa_s->global->p2p_long_listen = 0;
 
 	if (wpa_s->global->p2p_disabled || wpa_s->global->p2p == NULL ||
@@ -8455,7 +8462,7 @@ static void wpas_p2p_scan_res_ignore_search(struct wpa_supplicant *wpa_s,
 
 static void wpas_p2p_stop_find_oper(struct wpa_supplicant *wpa_s)
 {
-	wpas_p2p_clear_pending_action_tx(wpa_s);
+	wpas_p2p_clear_pending_action_tx(wpa_s, true);
 	wpa_s->global->p2p_long_listen = 0;
 	eloop_cancel_timeout(wpas_p2p_long_listen_timeout, wpa_s, NULL);
 	eloop_cancel_timeout(wpas_p2p_join_scan, wpa_s, NULL);
@@ -8500,7 +8507,7 @@ int wpas_p2p_listen(struct wpa_supplicant *wpa_s, unsigned int timeout)
 	}
 
 	wpa_supplicant_cancel_sched_scan(wpa_s);
-	wpas_p2p_clear_pending_action_tx(wpa_s);
+	wpas_p2p_clear_pending_action_tx(wpa_s, false);
 
 	if (timeout == 0) {
 		/*

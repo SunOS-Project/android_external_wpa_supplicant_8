@@ -191,9 +191,7 @@ static int get_center_320mhz(struct hostapd_hw_modes *mode, u8 channel,
 {
 	unsigned int i;
 
-	if (mode->mode != HOSTAPD_MODE_IEEE80211A ||
-	    mode->num_channels == 0 ||
-	    !is_6ghz_freq(mode->channels[0].freq))
+	if (mode->mode != HOSTAPD_MODE_IEEE80211A || !mode->is_6ghz)
 		return 0;
 
 	for (i = 0; i < num_chan; i++) {

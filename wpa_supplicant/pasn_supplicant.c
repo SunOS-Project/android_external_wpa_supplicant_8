@@ -174,7 +174,7 @@ static int wpas_pasn_get_params_from_bss(struct wpa_supplicant *wpa_s,
 		}
 	}
 
-	rsne = wpa_bss_get_ie(bss, WLAN_EID_RSN);
+	rsne = wpa_bss_get_rsne(wpa_s, bss, NULL, false);
 	if (!rsne) {
 		wpa_printf(MSG_DEBUG, "PASN: BSS without RSNE");
 		return -1;
@@ -186,7 +186,7 @@ static int wpas_pasn_get_params_from_bss(struct wpa_supplicant *wpa_s,
 		return -1;
 	}
 
-	rsnxe = wpa_bss_get_ie(bss, WLAN_EID_RSNX);
+	rsnxe = wpa_bss_get_rsnxe(wpa_s, bss, NULL, false);
 
 	ssid_str_len = bss->ssid_len;
 	ssid_str = bss->ssid;
@@ -426,6 +426,7 @@ static void wpas_pasn_delete_peers(struct wpa_supplicant *wpa_s,
 }
 
 
+#ifdef CONFIG_FILS
 static void wpas_pasn_initiate_eapol(struct pasn_data *pasn,
 				     struct wpa_ssid *ssid)
 {
@@ -443,6 +444,7 @@ static void wpas_pasn_initiate_eapol(struct pasn_data *pasn,
 
 	eapol_sm_notify_config(pasn->eapol, &ssid->eap, &eapol_conf);
 }
+#endif /* CONFIG_FILS */
 
 
 static void wpas_pasn_reset(struct wpa_supplicant *wpa_s)
@@ -472,13 +474,13 @@ static struct wpa_bss * wpas_pasn_allowed(struct wpa_supplicant *wpa_s,
 		return NULL;
 	}
 
-	bss = wpa_bss_get_bssid(wpa_s, peer_addr);
+	bss = wpa_bss_get_bssid_latest(wpa_s, peer_addr);
 	if (!bss) {
 		wpa_printf(MSG_DEBUG, "PASN: BSS not found");
 		return NULL;
 	}
 
-	rsne = wpa_bss_get_ie(bss, WLAN_EID_RSN);
+	rsne = wpa_bss_get_rsne(wpa_s, bss, NULL, false);
 	if (!rsne) {
 		wpa_printf(MSG_DEBUG, "PASN: BSS without RSNE");
 		return NULL;
@@ -509,8 +511,10 @@ static void wpas_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 	struct wpa_ssid *ssid;
 	struct wpa_bss *bss;
 	const u8 *rsne, *rsnxe;
+#ifdef CONFIG_FILS
 	const u8 *indic;
 	u16 fils_info;
+#endif /* CONFIG_FILS */
 	u16 capab = 0;
 	bool derive_kdk;
 	int ret;
@@ -540,13 +544,13 @@ static void wpas_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 		goto fail;
 	}
 
-	rsne = wpa_bss_get_ie(bss, WLAN_EID_RSN);
+	rsne = wpa_bss_get_rsne(wpa_s, bss, NULL, false);
 	if (!rsne) {
 		wpa_printf(MSG_DEBUG, "PASN: BSS without RSNE");
 		goto fail;
 	}
 
-	rsnxe = wpa_bss_get_ie(bss, WLAN_EID_RSNX);
+	rsnxe = wpa_bss_get_rsnxe(wpa_s, bss, NULL, false);
 
 	derive_kdk = (wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_SEC_LTF_STA) &&
 		ieee802_11_rsnx_capab(rsnxe,

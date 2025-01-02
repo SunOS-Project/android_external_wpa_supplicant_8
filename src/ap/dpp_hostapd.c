@@ -539,8 +539,15 @@ void hostapd_dpp_tx_status(struct hostapd_data *hapd, const u8 *dst,
 		return;
 	}
 
-	if (hapd->dpp_auth_ok_on_ack)
+	if (hapd->dpp_auth_ok_on_ack) {
 		hostapd_dpp_auth_success(hapd, 1);
+		if (!hapd->dpp_auth) {
+			/* The authentication session could have been removed in
+			 * some error cases, e.g., when starting GAS client and
+			 * failing to send the initial request. */
+			return;
+		}
+	}
 
 	if (!is_broadcast_ether_addr(dst) && !ok) {
 		wpa_printf(MSG_DEBUG,
@@ -2133,7 +2140,7 @@ static void hostapd_dpp_rx_peer_disc_req(struct hostapd_data *hapd,
 	else
 		expiration = 0;
 
-	if (wpa_auth_pmksa_add3(hapd->wpa_auth, src, intro.pmk, intro.pmk_len,
+	if (wpa_auth_pmksa_add2(hapd->wpa_auth, src, intro.pmk, intro.pmk_len,
 				intro.pmkid, expiration,
 				WPA_KEY_MGMT_DPP, pkhash) < 0) {
 		wpa_printf(MSG_ERROR, "DPP: Failed to add PMKSA cache entry");
@@ -2907,7 +2914,7 @@ hostapd_dpp_rx_priv_peer_intro_update(struct hostapd_data *hapd, const u8 *src,
 	else
 		expiration = 0;
 
-	if (wpa_auth_pmksa_add3(hapd->wpa_auth, src, intro.pmk, intro.pmk_len,
+	if (wpa_auth_pmksa_add2(hapd->wpa_auth, src, intro.pmk, intro.pmk_len,
 				intro.pmkid, expiration,
 				WPA_KEY_MGMT_DPP, pkhash) < 0) {
 		wpa_printf(MSG_ERROR, "DPP: Failed to add PMKSA cache entry");
@@ -3094,6 +3101,13 @@ hostapd_dpp_gas_req_handler(struct hostapd_data *hapd, const u8 *sa,
 		 * exchange. */
 		dpp_notify_auth_success(hapd->dpp_auth, 1);
 		hapd->dpp_auth_ok_on_ack = 0;
+#ifdef CONFIG_TESTING_OPTIONS
+		if (dpp_test == DPP_TEST_STOP_AT_AUTH_CONF) {
+			wpa_printf(MSG_INFO,
+				   "DPP: TESTING - stop at Authentication Confirm");
+			return NULL;
+		}
+#endif /* CONFIG_TESTING_OPTIONS */
 	}
 
 	wpa_hexdump(MSG_DEBUG,
@@ -3927,6 +3941,7 @@ int hostapd_dpp_push_button(struct hostapd_data *hapd, const char *cmd)
 	eloop_register_timeout(100, 0, hostapd_dpp_push_button_expire,
 			       hapd, NULL);
 
+	wpa_msg(hapd->msg_ctx, MSG_INFO, DPP_EVENT_PB_STATUS "started");
 	return 0;
 }
 
@@ -3948,11 +3963,25 @@ void hostapd_dpp_push_button_stop(struct hostapd_data *hapd)
 	ifaces->dpp_pb_time.usec = 0;
 	dpp_pkex_free(hapd->dpp_pkex);
 	hapd->dpp_pkex = NULL;
+	hapd->dpp_pkex_bi = NULL;
 	os_free(hapd->dpp_pkex_auth_cmd);
 	hapd->dpp_pkex_auth_cmd = NULL;
 
 	if (ifaces->dpp_pb_bi) {
 		char id[20];
+		size_t i;
+
+		for (i = 0; i < ifaces->count; i++) {
+			struct hostapd_iface *iface = ifaces->iface[i];
+			size_t j;
+
+			for (j = 0; iface && j < iface->num_bss; j++) {
+				struct hostapd_data *h = iface->bss[j];
+
+				if (h->dpp_pkex_bi == ifaces->dpp_pb_bi)
+					h->dpp_pkex_bi = NULL;
+			}
+		}
 
 		os_snprintf(id, sizeof(id), "%u", ifaces->dpp_pb_bi->id);
 		dpp_bootstrap_remove(ifaces->dpp, id);
