@@ -23,6 +23,16 @@
 /* DIRA Cipher versions */
 #define DIRA_CIPHER_VERSION_128 0
 
+#define DEVICE_IDENTITY_KEY_MAX_LEN 64
+#define DEVICE_IDENTITY_KEY_LEN 16
+#define DEVICE_IDENTITY_TAG_LEN 8
+#define DEVICE_IDENTITY_NONCE_LEN 8
+#define DEVICE_MAX_HASH_LEN 32
+#define DIR_STR_LEN 3
+
+/* DIRA Cipher versions */
+#define DIRA_CIPHER_VERSION_128 0
+
 struct weighted_pcl;
 
 /* P2P ASP Setup Capability */

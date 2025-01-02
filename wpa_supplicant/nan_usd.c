@@ -13,8 +13,8 @@
 #include "wpa_supplicant_i.h"
 #include "offchannel.h"
 #include "driver_i.h"
-#include "p2p_supplicant.h"
 #include "notify.h"
+#include "p2p_supplicant.h"
 #include "nan_usd.h"
 
 

@@ -13,6 +13,8 @@
 extern "C" {
 #endif
 
+#define WPA_CTRL_IFACE_LINK_NAME	"link"
+
 /* wpa_supplicant control interface - fixed message prefixes */
 
 /** Interactive request for identity/password/pin */
@@ -87,6 +89,8 @@ extern "C" {
 #define WPA_EVENT_BEACON_LOSS "CTRL-EVENT-BEACON-LOSS "
 /** Regulatory domain channel */
 #define WPA_EVENT_REGDOM_CHANGE "CTRL-EVENT-REGDOM-CHANGE "
+/** Regulatory beacon hint */
+#define WPA_EVENT_REGDOM_BEACON_HINT "CTRL-EVENT-REGDOM-BEACON-HINT "
 /** Channel switch started (followed by freq=<MHz> and other channel parameters)
  */
 #define WPA_EVENT_CHANNEL_SWITCH_STARTED "CTRL-EVENT-STARTED-CHANNEL-SWITCH "
@@ -202,6 +206,7 @@ extern "C" {
 #define DPP_EVENT_CONFOBJ_SSID "DPP-CONFOBJ-SSID "
 #define DPP_EVENT_CONFOBJ_SSID_CHARSET "DPP-CONFOBJ-SSID-CHARSET "
 #define DPP_EVENT_CONFOBJ_PASS "DPP-CONFOBJ-PASS "
+#define DPP_EVENT_CONFOBJ_IDPASS "DPP-CONFOBJ-IDPASS "
 #define DPP_EVENT_CONFOBJ_PSK "DPP-CONFOBJ-PSK "
 #define DPP_EVENT_CONNECTOR "DPP-CONNECTOR "
 #define DPP_EVENT_C_SIGN_KEY "DPP-C-SIGN-KEY "
@@ -223,6 +228,7 @@ extern "C" {
 #define DPP_EVENT_CHIRP_STOPPED "DPP-CHIRP-STOPPED "
 #define DPP_EVENT_MUD_URL "DPP-MUD-URL "
 #define DPP_EVENT_BAND_SUPPORT "DPP-BAND-SUPPORT "
+#define DPP_EVENT_ENROLLEE_CAPABILITY "DPP-ENROLLEE-CAPABILITY "
 #define DPP_EVENT_CSR "DPP-CSR "
 #define DPP_EVENT_CHIRP_RX "DPP-CHIRP-RX "
 #define DPP_EVENT_CONF_NEEDED "DPP-CONF-NEEDED "
@@ -414,6 +420,9 @@ extern "C" {
 #define BEACON_REQ_TX_STATUS "BEACON-REQ-TX-STATUS "
 /* parameters: <STA address> <dialog token> <report mode> <beacon report> */
 #define BEACON_RESP_RX "BEACON-RESP-RX "
+
+/* parameters: <STA address> <dialog token> <link measurement report> */
+#define LINK_MSR_RESP_RX "LINK-MSR-RESP-RX "
 
 /* PMKSA cache entry added; parameters: <BSSID> <network_id> */
 #define PMKSA_CACHE_ADDED "PMKSA-CACHE-ADDED "

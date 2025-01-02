@@ -64,6 +64,7 @@ ifdef CONFIG_TESTING_OPTIONS
 CFLAGS += -DCONFIG_TESTING_OPTIONS
 CONFIG_WPS_TESTING=y
 CONFIG_TDLS_TESTING=y
+NEED_AES_WRAP=y
 endif
 
 mkconfig:
@@ -113,10 +114,7 @@ OBJS += ../src/utils/ip_addr.o
 OBJS += ../src/utils/crc32.o
 OBJS += ../src/common/ptksa_cache.o
 OBJS += ../src/rsn_supp/pmksa_cache.o
-OBJS += op_classes.o
-OBJS += rrm.o
 OBJS += twt.o
-OBJS += robust_av.o
 OBJS_p = wpa_passphrase.o
 OBJS_p += ../src/utils/common.o
 OBJS_p += ../src/utils/wpa_debug.o
@@ -125,7 +123,6 @@ OBJS_c = wpa_cli.o ../src/common/wpa_ctrl.o
 OBJS_c += ../src/utils/wpa_debug.o
 OBJS_c += ../src/utils/common.o
 OBJS_c += ../src/common/cli.o
-OBJS += wmm_ac.o
 
 ifndef CONFIG_OS
 ifdef CONFIG_NATIVE_WINDOWS
@@ -194,7 +191,7 @@ CFLAGS += -Werror -DEAPOL_TEST
 endif
 
 ifdef CONFIG_CODE_COVERAGE
-CFLAGS += -O0 -fprofile-arcs -ftest-coverage
+CFLAGS += -O0 -fprofile-arcs -ftest-coverage -U_FORTIFY_SOURCE
 LIBS += -lgcov
 LIBS_c += -lgcov
 LIBS_p += -lgcov
@@ -358,6 +355,10 @@ ifdef CONFIG_MBO
 CONFIG_WNM=y
 endif
 
+ifdef CONFIG_BGSCAN_SIMPLE
+CONFIG_WNM=y
+endif
+
 ifdef CONFIG_WNM
 CFLAGS += -DCONFIG_WNM
 OBJS += wnm_sta.o
@@ -486,6 +487,28 @@ endif
 
 ifdef CONFIG_NO_LOAD_DYNAMIC_EAP
 CFLAGS += -DCONFIG_NO_LOAD_DYNAMIC_EAP
+endif
+
+ifdef CONFIG_NO_RRM
+CFLAGS += -DCONFIG_NO_RRM
+else
+OBJS += rrm.o
+ifdef CONFIG_AP
+OBJS += ../src/ap/rrm.o
+endif
+OBJS += op_classes.o
+endif
+
+ifdef CONFIG_NO_WMM_AC
+CFLAGS += -DCONFIG_NO_WMM_AC
+else
+OBJS += wmm_ac.o
+endif
+
+ifdef CONFIG_NO_ROBUST_AV
+CFLAGS += -DCONFIG_NO_ROBUST_AV
+else
+OBJS += robust_av.o
 endif
 
 include ../src/drivers/drivers.mak
@@ -994,7 +1017,6 @@ OBJS += ../src/ap/beacon.o
 OBJS += ../src/ap/bss_load.o
 OBJS += ../src/ap/eap_user_db.o
 OBJS += ../src/ap/neighbor_db.o
-OBJS += ../src/ap/rrm.o
 OBJS += ../src/ap/ieee802_11_ht.o
 ifdef CONFIG_IEEE80211AC
 OBJS += ../src/ap/ieee802_11_vht.o
@@ -1072,6 +1094,7 @@ endif
 ifdef CONFIG_MBO
 OBJS += mbo.o
 CFLAGS += -DCONFIG_MBO
+NEED_GAS=y
 endif
 
 ifdef NEED_RSN_AUTHENTICATOR
@@ -1094,17 +1117,20 @@ endif
 
 ifdef CONFIG_PCSC
 # PC/SC interface for smartcards (USIM, GSM SIM)
-CFLAGS += -DPCSC_FUNCS -I/usr/include/PCSC
+CFLAGS += -DPCSC_FUNCS
 OBJS += ../src/utils/pcsc_funcs.o
 ifdef CONFIG_NATIVE_WINDOWS
 #Once MinGW gets support for WinScard, -lwinscard could be used instead of the
 #dynamic symbol loading that is now used in pcsc_funcs.c
 #LIBS += -lwinscard
+CFLAGS += -I/usr/include/PCSC
 else
 ifdef CONFIG_OSX
 LIBS += -framework PCSC
+CFLAGS += -I/usr/include/PCSC
 else
 LIBS += $(shell $(PKG_CONFIG) --libs libpcsclite)
+CFLAGS += $(shell $(PKG_CONFIG) --cflags libpcsclite)
 endif
 endif
 endif
@@ -1168,6 +1194,10 @@ endif
 
 ifdef CONFIG_TLSV12
 CFLAGS += -DCONFIG_TLSV12
+endif
+
+ifdef CONFIG_RADIUS_TLS
+TLS_FUNCS=y
 endif
 
 ifeq ($(CONFIG_TLS), wolfssl)
@@ -1908,6 +1938,9 @@ OBJS += wpa_supplicant.o events.o bssid_ignore.o wpas_glue.o scan.o
 OBJS_t := $(OBJS) $(OBJS_l2) eapol_test.o
 OBJS_t += ../src/radius/radius_client.o
 OBJS_t += ../src/radius/radius.o
+ifdef CONFIG_RADIUS_TLS
+CFLAGS += -DCONFIG_RADIUS_TLS
+endif
 OBJS_t2 := $(OBJS) $(OBJS_l2) preauth_test.o
 
 OBJS_nfc := $(OBJS) $(OBJS_l2) nfc_pw_token.o
