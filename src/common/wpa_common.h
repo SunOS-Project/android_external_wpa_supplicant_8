@@ -17,6 +17,7 @@
 #define PMK_LEN_SUITE_B_192 48
 #define PMK_LEN_MAX 64
 #define WPA_REPLAY_COUNTER_LEN 8
+#define RSN_PN_LEN 6
 #define WPA_NONCE_LEN 32
 #define WPA_KEY_RSC_LEN 8
 #define WPA_GMK_LEN 32
@@ -143,6 +144,7 @@ WPA_CIPHER_BIP_CMAC_256)
 #define WFA_KEY_DATA_IP_ADDR_ALLOC RSN_SELECTOR(0x50, 0x6f, 0x9a, 5)
 #define WFA_KEY_DATA_TRANSITION_DISABLE RSN_SELECTOR(0x50, 0x6f, 0x9a, 0x20)
 #define WFA_KEY_DATA_DPP RSN_SELECTOR(0x50, 0x6f, 0x9a, 0x21)
+#define WFA_KEY_DATA_RSN_OVERRIDE_LINK RSN_SELECTOR(0x50, 0x6f, 0x9a, 0x2d)
 
 #define WPA_OUI_TYPE RSN_SELECTOR(0x00, 0x50, 0xf2, 1)
 
@@ -339,52 +341,54 @@ struct rsn_ie_hdr {
 } STRUCT_PACKED;
 
 
+#define KDE_HDR_LEN (1 + 1 + RSN_SELECTOR_LEN)
+
 struct rsn_error_kde {
 	be16 mui;
 	be16 error_type;
 } STRUCT_PACKED;
 
-#define WPA_IGTK_KDE_PREFIX_LEN (2 + 6)
+#define WPA_IGTK_KDE_PREFIX_LEN (2 + RSN_PN_LEN)
 struct wpa_igtk_kde {
 	u8 keyid[2];
-	u8 pn[6];
+	u8 pn[RSN_PN_LEN];
 	u8 igtk[WPA_IGTK_MAX_LEN];
 } STRUCT_PACKED;
 
-#define WPA_BIGTK_KDE_PREFIX_LEN (2 + 6)
+#define WPA_BIGTK_KDE_PREFIX_LEN (2 + RSN_PN_LEN)
 struct wpa_bigtk_kde {
 	u8 keyid[2];
-	u8 pn[6];
+	u8 pn[RSN_PN_LEN];
 	u8 bigtk[WPA_BIGTK_MAX_LEN];
 } STRUCT_PACKED;
 
-#define RSN_MLO_GTK_KDE_PREFIX_LENGTH		(1 + 6)
+#define RSN_MLO_GTK_KDE_PREFIX_LENGTH		(1 + RSN_PN_LEN)
 #define RSN_MLO_GTK_KDE_PREFIX0_KEY_ID_MASK	0x03
 #define RSN_MLO_GTK_KDE_PREFIX0_TX		0x04
 #define RSN_MLO_GTK_KDE_PREFIX0_LINK_ID_SHIFT	4
 #define RSN_MLO_GTK_KDE_PREFIX0_LINK_ID_MASK	0xF0
 
-#define RSN_MLO_IGTK_KDE_PREFIX_LENGTH		(2 + 6 + 1)
+#define RSN_MLO_IGTK_KDE_PREFIX_LENGTH		(2 + RSN_PN_LEN + 1)
 #define RSN_MLO_IGTK_KDE_PREFIX8_LINK_ID_SHIFT	4
 #define RSN_MLO_IGTK_KDE_PREFIX8_LINK_ID_MASK	0xF0
 struct rsn_mlo_igtk_kde {
 	u8 keyid[2];
-	u8 pn[6];
+	u8 pn[RSN_PN_LEN];
 	u8 prefix8;
 	u8 igtk[WPA_IGTK_MAX_LEN];
 } STRUCT_PACKED;
 
-#define RSN_MLO_BIGTK_KDE_PREFIX_LENGTH		(2 + 6 + 1)
+#define RSN_MLO_BIGTK_KDE_PREFIX_LENGTH		(2 + RSN_PN_LEN + 1)
 #define RSN_MLO_BIGTK_KDE_PREFIX8_LINK_ID_SHIFT	4
 #define RSN_MLO_BIGTK_KDE_PREFIX8_LINK_ID_MASK	0xF0
 struct rsn_mlo_bigtk_kde {
 	u8 keyid[2];
-	u8 pn[6];
+	u8 pn[RSN_PN_LEN];
 	u8 prefix8;
 	u8 bigtk[WPA_BIGTK_MAX_LEN];
 } STRUCT_PACKED;
 
-#define RSN_MLO_LINK_KDE_FIXED_LENGTH		(1 + 6)
+#define RSN_MLO_LINK_KDE_FIXED_LENGTH		(1 + ETH_ALEN)
 #define RSN_MLO_LINK_KDE_LINK_INFO_INDEX	0
 #define RSN_MLO_LINK_KDE_LI_LINK_ID_SHIFT	0
 #define RSN_MLO_LINK_KDE_LI_LINK_ID_MASK	0x0F
@@ -558,7 +562,7 @@ u32 wpa_akm_to_suite(int akm);
 int wpa_compare_rsn_ie(int ft_initial_assoc,
 		       const u8 *ie1, size_t ie1len,
 		       const u8 *ie2, size_t ie2len);
-int wpa_insert_pmkid(u8 *ies, size_t *ies_len, const u8 *pmkid);
+int wpa_insert_pmkid(u8 *ies, size_t *ies_len, const u8 *pmkid, bool replace);
 
 struct wpa_ft_ies {
 	const u8 *mdie;
@@ -641,6 +645,14 @@ struct wpa_pasn_params_data {
 #define WPA_PASN_PUBKEY_COMPRESSED_1 0x03
 #define WPA_PASN_PUBKEY_UNCOMPRESSED 0x04
 
+/* WPA3 specification - RSN Selection element */
+enum rsn_selection_variant {
+	RSN_SELECTION_RSNE = 0,
+	RSN_SELECTION_RSNE_OVERRIDE = 1,
+	RSN_SELECTION_RSNE_OVERRIDE_2 = 2,
+};
+
+
 int wpa_ft_parse_ies(const u8 *ies, size_t ies_len, struct wpa_ft_ies *parse,
 		     int key_mgmt, bool reassoc_resp);
 void wpa_ft_parse_ies_free(struct wpa_ft_ies *parse);
@@ -696,10 +708,20 @@ struct wpa_eapol_ie_parse {
 	size_t supp_channels_len;
 	const u8 *supp_oper_classes;
 	size_t supp_oper_classes_len;
+	const u8 *ssid;
+	size_t ssid_len;
 	u8 qosinfo;
 	u16 aid;
 	const u8 *wmm;
 	size_t wmm_len;
+	const u8 *rsn_selection;
+	size_t rsn_selection_len;
+	const u8 *rsne_override;
+	size_t rsne_override_len;
+	const u8 *rsne_override_2;
+	size_t rsne_override_2_len;
+	const u8 *rsnxe_override;
+	size_t rsnxe_override_len;
 	u16 valid_mlo_gtks; /* bitmap of valid link GTK KDEs */
 	const u8 *mlo_gtk[MAX_NUM_MLD_LINKS];
 	size_t mlo_gtk_len[MAX_NUM_MLD_LINKS];
@@ -712,6 +734,8 @@ struct wpa_eapol_ie_parse {
 	u16 valid_mlo_links; /* bitmap of valid MLO link KDEs */
 	const u8 *mlo_link[MAX_NUM_MLD_LINKS];
 	size_t mlo_link_len[MAX_NUM_MLD_LINKS];
+	const u8 *rsn_override_link[MAX_NUM_MLD_LINKS];
+	size_t rsn_override_link_len[MAX_NUM_MLD_LINKS];
 };
 
 int wpa_parse_kde_ies(const u8 *buf, size_t len, struct wpa_eapol_ie_parse *ie);
@@ -782,5 +806,8 @@ int wpa_pasn_parse_parameter_ie(const u8 *data, u8 len, bool from_ap,
 
 void wpa_pasn_add_rsnxe(struct wpabuf *buf, u16 capab);
 int wpa_pasn_add_extra_ies(struct wpabuf *buf, const u8 *extra_ies, size_t len);
+
+void rsn_set_snonce_cookie(u8 *snonce);
+bool rsn_is_snonce_cookie(const u8 *snonce);
 
 #endif /* WPA_COMMON_H */

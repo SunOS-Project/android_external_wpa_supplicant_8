@@ -931,6 +931,7 @@ static void wpa_config_write_network(FILE *f, struct wpa_ssid *ssid)
 	INT(owe_ptk_workaround);
 	INT(multi_ap_backhaul_sta);
 	INT(ft_eap_pmksa_caching);
+	INT(multi_ap_profile);
 	INT(beacon_prot);
 	INT(transition_disable);
 	INT(sae_pk);
@@ -973,6 +974,8 @@ static void wpa_config_write_network(FILE *f, struct wpa_ssid *ssid)
 #endif /* CONFIG_HE_OVERRIDES */
 	INT(disable_eht);
 	INT(enable_4addr_mode);
+	INT(max_idle);
+	INT(ssid_protection);
 
 #undef STR
 #undef INT
@@ -1726,6 +1729,20 @@ static void wpa_config_write_global(FILE *f, struct wpa_config *config)
 	if (config->wowlan_disconnect_on_deinit)
 		fprintf(f, "wowlan_disconnect_on_deinit=%d\n",
 			config->wowlan_disconnect_on_deinit);
+	if (config->rsn_overriding)
+		fprintf(f, "rsn_overriding=%d\n", config->rsn_overriding);
+#ifdef CONFIG_TESTING_OPTIONS
+	if (config->mld_force_single_link)
+		fprintf(f, "mld_force_single_link=1\n");
+	if (config->mld_connect_band_pref != MLD_CONNECT_BAND_PREF_AUTO)
+		fprintf(f, "mld_connect_band_pref=%d\n",
+			config->mld_connect_band_pref);
+	if (!is_zero_ether_addr(config->mld_connect_bssid_pref))
+		fprintf(f, "mld_connect_bssid_pref=" MACSTR "\n",
+			MAC2STR(config->mld_connect_bssid_pref));
+#endif /* CONFIG_TESTING_OPTIONS */
+	if (config->ft_prepend_pmkid)
+		fprintf(f, "ft_prepend_pmkid=%d\n", config->ft_prepend_pmkid);
 	if (config->dik) {
 		fprintf(f, "dik_cipher=%d\n", config->dik_cipher);
 		write_global_bin(f, "dik", config->dik);

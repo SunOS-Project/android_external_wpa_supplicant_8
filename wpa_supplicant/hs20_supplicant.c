@@ -27,6 +27,7 @@
 #include "interworking.h"
 #include "hs20_supplicant.h"
 #include "base64.h"
+#include "notify.h"
 
 
 #define OSU_MAX_ITEMS 10
@@ -68,7 +69,6 @@ struct osu_provider {
 void hs20_configure_frame_filters(struct wpa_supplicant *wpa_s)
 {
 	struct wpa_bss *bss = wpa_s->current_bss;
-	u8 *bssid = wpa_s->bssid;
 	const u8 *ie;
 	const u8 *ext_capa;
 	u32 filter = 0;
@@ -79,9 +79,8 @@ void hs20_configure_frame_filters(struct wpa_supplicant *wpa_s)
 			|| !is_hs20_config(wpa_s)
 #endif
 			) {
-		wpa_printf(MSG_DEBUG,
-			   "Not configuring frame filtering - BSS " MACSTR
-			   " is not a Hotspot 2.0 network", MAC2STR(bssid));
+		/* Not configuring frame filtering - BSS is not a Hotspot 2.0
+		 * network */
 		return;
 	}
 
@@ -1102,7 +1101,7 @@ void hs20_osu_icon_fetch(struct wpa_supplicant *wpa_s)
 		prov_anqp = bss->anqp->hs20_osu_providers_list;
 		if (prov_anqp == NULL)
 			continue;
-		ie = wpa_bss_get_ie(bss, WLAN_EID_RSN);
+		ie = wpa_bss_get_rsne(wpa_s, bss, NULL, false);
 		if (ie && wpa_parse_wpa_ie(ie, 2 + ie[1], &data) == 0 &&
 		    (data.key_mgmt & WPA_KEY_MGMT_OSEN)) {
 			osu_ssid2 = bss->ssid;
@@ -1354,8 +1353,7 @@ void hs20_rx_t_c_acceptance(struct wpa_supplicant *wpa_s, const char *url)
 		return;
 	}
 
-	wpa_msg(wpa_s, MSG_INFO, HS20_T_C_ACCEPTANCE "%s", url);
-	wpas_notify_hs20_rx_terms_and_conditions_acceptance(wpa_s, url);
+	wpas_notify_hs20_t_c_acceptance(wpa_s, url);
 }
 
 

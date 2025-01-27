@@ -1063,7 +1063,7 @@ std::pair<std::string, ndk::ScopedAStatus> P2pIface::connectInternal(
 		wpa_s, peer_address.data(), pin, wps_method, persistent, false,
 		join_existing_group, false, go_intent_signed, 0, 0, -1, false, ht40,
 		vht, CONF_OPER_CHWIDTH_USE_HT, he, edmg, nullptr, 0, is6GhzAllowed(wpa_s),
-		0, 0, nullptr);
+		false, 0, NULL);
 	if (new_pin < 0) {
 		return {"", createStatus(SupplicantStatusCode::FAILURE_UNKNOWN)};
 	}

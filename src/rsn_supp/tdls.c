@@ -1571,9 +1571,8 @@ static bool wpa_tdls_is_lnkid_bss_valid(struct wpa_sm *sm,
 	} else {
 		int i;
 
-		for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-			if ((sm->mlo.valid_links & BIT(i)) &&
-			    ether_addr_equal(lnkid->bssid,
+		for_each_link(sm->mlo.valid_links, i) {
+			if (ether_addr_equal(lnkid->bssid,
 					     sm->mlo.links[i].bssid)) {
 				*link_id = i;
 				break;
@@ -3195,7 +3194,7 @@ int wpa_tdls_process_discovery_response(struct wpa_sm *sm, const u8 *addr,
 					const u8 *buf, size_t len)
 {
 	struct ieee802_11_elems elems;
-	struct wpa_tdls_lnkid lnkid;
+	const struct wpa_tdls_lnkid *lnkid;
 	struct wpa_tdls_peer *peer;
 	size_t min_req_len = 1 /* Dialog Token */ + 2 /* Capability */ +
 		sizeof(struct wpa_tdls_lnkid);
@@ -3225,12 +3224,12 @@ int wpa_tdls_process_discovery_response(struct wpa_sm *sm, const u8 *addr,
 		return -1;
 	}
 
-	os_memcpy(&lnkid.bssid[0], elems.link_id, sizeof(lnkid) - 2);
+	lnkid = (const struct wpa_tdls_lnkid *) (elems.link_id - 2);
 
-	if (!wpa_tdls_is_lnkid_bss_valid(sm, &lnkid, &link_id)) {
+	if (!wpa_tdls_is_lnkid_bss_valid(sm, lnkid, &link_id)) {
 		wpa_printf(MSG_DEBUG,
 			   "TDLS: Discovery Response from different BSS "
-			   MACSTR, MAC2STR(lnkid.bssid));
+			   MACSTR, MAC2STR(lnkid->bssid));
 		return -1;
 	}
 
@@ -3242,7 +3241,8 @@ int wpa_tdls_process_discovery_response(struct wpa_sm *sm, const u8 *addr,
 
 	peer->mld_link_id = link_id;
 	wpa_printf(MSG_DEBUG, "TDLS: Link identifier BSS: " MACSTR
-		   " , link id: %u", MAC2STR(lnkid.bssid), link_id);
+		   " , link id: %u", MAC2STR(lnkid->bssid), link_id);
+
 	peer->disc_resp_rcvd = true;
 	if (peer->setup_req_rcvd) {
 		peer->setup_req_rcvd = false;

@@ -233,6 +233,12 @@ void wpa_sm_key_request(struct wpa_sm *sm, int error, int pairwise)
 		return;
 	}
 
+	if (!sm->ptk_set) {
+		wpa_printf(MSG_INFO,
+			   "WPA: No PTK derived yet - cannot send EAPOL-Key Request");
+		return;
+	}
+
 	if (wpa_use_akm_defined(sm->key_mgmt))
 		ver = WPA_KEY_INFO_TYPE_AKM_DEFINED;
 	else if (wpa_key_mgmt_ft(sm->key_mgmt) ||
@@ -254,10 +260,11 @@ void wpa_sm_key_request(struct wpa_sm *sm, int error, int pairwise)
 		       sm->proto == WPA_PROTO_OSEN) ?
 		EAPOL_KEY_TYPE_RSN : EAPOL_KEY_TYPE_WPA;
 	key_info = WPA_KEY_INFO_REQUEST | ver;
-	if (sm->ptk_set)
-		key_info |= WPA_KEY_INFO_SECURE;
-	if (sm->ptk_set && mic_len)
+	key_info |= WPA_KEY_INFO_SECURE;
+	if (mic_len)
 		key_info |= WPA_KEY_INFO_MIC;
+	else
+		key_info |= WPA_KEY_INFO_ENCR_KEY_DATA;
 	if (error)
 		key_info |= WPA_KEY_INFO_ERROR;
 	if (pairwise)
@@ -522,11 +529,14 @@ int wpa_supplicant_send_2_of_4(struct wpa_sm *sm, const unsigned char *dst,
 			       const u8 *wpa_ie, size_t wpa_ie_len,
 			       struct wpa_ptk *ptk)
 {
-	size_t mic_len, hdrlen, rlen;
+	size_t mic_len, hdrlen, rlen, extra_len = 0;
 	struct wpa_eapol_key *reply;
 	u8 *rbuf, *key_mic;
-	u8 *rsn_ie_buf = NULL;
+	u8 *rsn_ie_buf = NULL, *buf2 = NULL;
 	u16 key_info;
+#ifdef CONFIG_TESTING_OPTIONS
+	size_t pad_len = 0;
+#endif /* CONFIG_TESTING_OPTIONS */
 
 	if (wpa_ie == NULL) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_WARNING, "WPA: No wpa_ie set - "
@@ -550,7 +560,7 @@ int wpa_supplicant_send_2_of_4(struct wpa_sm *sm, const unsigned char *dst,
 			return -1;
 		os_memcpy(rsn_ie_buf, wpa_ie, wpa_ie_len);
 		res = wpa_insert_pmkid(rsn_ie_buf, &wpa_ie_len,
-				       sm->pmk_r1_name);
+				       sm->pmk_r1_name, !sm->ft_prepend_pmkid);
 		if (res < 0) {
 			os_free(rsn_ie_buf);
 			return -1;
@@ -572,15 +582,58 @@ int wpa_supplicant_send_2_of_4(struct wpa_sm *sm, const unsigned char *dst,
 	}
 #endif /* CONFIG_IEEE80211R */
 
+	if (sm->rsn_override != RSN_OVERRIDE_NOT_USED) {
+		u8 *pos;
+
+		buf2 = os_malloc(wpa_ie_len + 2 + 4 + 1);
+		if (!buf2) {
+			os_free(rsn_ie_buf);
+			return -1;
+		}
+		os_memcpy(buf2, wpa_ie, wpa_ie_len);
+		pos = buf2 + wpa_ie_len;
+		*pos++ = WLAN_EID_VENDOR_SPECIFIC;
+		*pos++ = 4 + 1;
+		WPA_PUT_BE32(pos, RSN_SELECTION_IE_VENDOR_TYPE);
+		pos += 4;
+		if (sm->rsn_override == RSN_OVERRIDE_RSNE) {
+			*pos++ = RSN_SELECTION_RSNE;
+		} else if (sm->rsn_override == RSN_OVERRIDE_RSNE_OVERRIDE) {
+			*pos++ = RSN_SELECTION_RSNE_OVERRIDE;
+		} else if (sm->rsn_override == RSN_OVERRIDE_RSNE_OVERRIDE_2) {
+			*pos++ = RSN_SELECTION_RSNE_OVERRIDE_2;
+		} else {
+			os_free(rsn_ie_buf);
+			os_free(buf2);
+			return -1;
+		}
+
+		wpa_ie = buf2;
+		wpa_ie_len += 2 + 4 + 1;
+
+	}
+
 	wpa_hexdump(MSG_DEBUG, "WPA: WPA IE for msg 2/4", wpa_ie, wpa_ie_len);
+
+#ifdef CONFIG_TESTING_OPTIONS
+	if (sm->test_eapol_m2_elems)
+		extra_len = wpabuf_len(sm->test_eapol_m2_elems);
+	if (sm->encrypt_eapol_m2) {
+		pad_len = (wpa_ie_len + extra_len) % 8;
+		if (pad_len)
+			pad_len = 8 - pad_len;
+		extra_len += pad_len + 8;
+	}
+#endif /* CONFIG_TESTING_OPTIONS */
 
 	mic_len = wpa_mic_len(sm->key_mgmt, sm->pmk_len);
 	hdrlen = sizeof(*reply) + mic_len + 2;
 	rbuf = wpa_sm_alloc_eapol(sm, IEEE802_1X_TYPE_EAPOL_KEY,
-				  NULL, hdrlen + wpa_ie_len,
+				  NULL, hdrlen + wpa_ie_len + extra_len,
 				  &rlen, (void *) &reply);
 	if (rbuf == NULL) {
 		os_free(rsn_ie_buf);
+		os_free(buf2);
 		return -1;
 	}
 
@@ -594,6 +647,10 @@ int wpa_supplicant_send_2_of_4(struct wpa_sm *sm, const unsigned char *dst,
 		key_info |= WPA_KEY_INFO_MIC;
 	else
 		key_info |= WPA_KEY_INFO_ENCR_KEY_DATA;
+#ifdef CONFIG_TESTING_OPTIONS
+	if (sm->encrypt_eapol_m2)
+		key_info |= WPA_KEY_INFO_ENCR_KEY_DATA;
+#endif /* CONFIG_TESTING_OPTIONS */
 	WPA_PUT_BE16(reply->key_info, key_info);
 	if (sm->proto == WPA_PROTO_RSN || sm->proto == WPA_PROTO_OSEN)
 		WPA_PUT_BE16(reply->key_length, 0);
@@ -605,9 +662,49 @@ int wpa_supplicant_send_2_of_4(struct wpa_sm *sm, const unsigned char *dst,
 		    WPA_REPLAY_COUNTER_LEN);
 
 	key_mic = (u8 *) (reply + 1);
-	WPA_PUT_BE16(key_mic + mic_len, wpa_ie_len); /* Key Data Length */
+	/* Key Data Length */
+	WPA_PUT_BE16(key_mic + mic_len, wpa_ie_len + extra_len);
 	os_memcpy(key_mic + mic_len + 2, wpa_ie, wpa_ie_len); /* Key Data */
 	os_free(rsn_ie_buf);
+	os_free(buf2);
+#ifdef CONFIG_TESTING_OPTIONS
+	if (sm->test_eapol_m2_elems) {
+		os_memcpy(key_mic + mic_len + 2 + wpa_ie_len,
+			  wpabuf_head(sm->test_eapol_m2_elems),
+			  wpabuf_len(sm->test_eapol_m2_elems));
+	}
+
+	if (sm->encrypt_eapol_m2) {
+		u8 *plain;
+		size_t plain_len;
+
+		if (sm->test_eapol_m2_elems)
+			extra_len = wpabuf_len(sm->test_eapol_m2_elems);
+		else
+			extra_len = 0;
+		plain_len = wpa_ie_len + extra_len + pad_len;
+		plain = os_memdup(key_mic + mic_len + 2, plain_len);
+		if (!plain) {
+			os_free(rbuf);
+			return -1;
+		}
+		if (pad_len)
+			plain[plain_len - pad_len] = 0xdd;
+
+		wpa_hexdump_key(MSG_DEBUG, "RSN: AES-WRAP using KEK",
+				ptk->kek, ptk->kek_len);
+		if (aes_wrap(ptk->kek, ptk->kek_len, plain_len / 8, plain,
+			     key_mic + mic_len + 2)) {
+			os_free(plain);
+			os_free(rbuf);
+			return -1;
+		}
+		wpa_hexdump(MSG_DEBUG,
+			    "RSN: Encrypted Key Data from AES-WRAP",
+			    key_mic + mic_len + 2, plain_len + 8);
+		os_free(plain);
+	}
+#endif /* CONFIG_TESTING_OPTIONS */
 
 	os_memcpy(reply->key_nonce, nonce, WPA_NONCE_LEN);
 
@@ -737,8 +834,8 @@ static size_t wpa_mlo_link_kde_len(struct wpa_sm *sm)
 	int i;
 	unsigned int num_links = 0;
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (sm->mlo.assoc_link_id != i && (sm->mlo.req_links & BIT(i)))
+	for_each_link(sm->mlo.req_links, i) {
+		if (sm->mlo.assoc_link_id != i)
 			num_links++;
 	}
 
@@ -751,8 +848,8 @@ static u8 * wpa_mlo_link_kde(struct wpa_sm *sm, u8 *pos)
 	int i;
 	u8 hdr[1 + ETH_ALEN];
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (sm->mlo.assoc_link_id == i || !(sm->mlo.req_links & BIT(i)))
+	for_each_link(sm->mlo.req_links, i) {
+		if (sm->mlo.assoc_link_id == i)
 			continue;
 
 		wpa_printf(MSG_DEBUG,
@@ -927,6 +1024,8 @@ static void wpa_supplicant_process_1_of_4(struct wpa_sm *sm,
 				"WPA: Failed to get random data for SNonce");
 			goto failed;
 		}
+		if (wpa_sm_rsn_overriding_supported(sm))
+			rsn_set_snonce_cookie(sm->snonce);
 		sm->renew_snonce = 0;
 		wpa_hexdump(MSG_DEBUG, "WPA: Renewed SNonce",
 			    sm->snonce, WPA_NONCE_LEN);
@@ -1497,10 +1596,7 @@ static int wpa_supplicant_pairwise_mlo_gtk(struct wpa_sm *sm,
 {
 	u8 i;
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (!(sm->mlo.valid_links & BIT(i)))
-			continue;
-
+	for_each_link(sm->mlo.valid_links, i) {
 		if (!ie->mlo_gtk[i]) {
 			wpa_msg(sm->ctx->msg_ctx, MSG_ERROR,
 				"MLO RSN: GTK not found for link ID %u", i);
@@ -1849,10 +1945,7 @@ static int mlo_ieee80211w_set_keys(struct wpa_sm *sm,
 	    sm->mgmt_group_cipher == WPA_CIPHER_GTK_NOT_USED)
 		return 0;
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (!(sm->mlo.valid_links & BIT(i)))
-			continue;
-
+	for_each_link(sm->mlo.valid_links, i) {
 		if (_mlo_ieee80211w_set_keys(sm, i, ie))
 			return -1;
 	}
@@ -2136,6 +2229,68 @@ static int wpa_supplicant_validate_ie(struct wpa_sm *sm,
 		return -1;
 	}
 
+	if (sm->proto == WPA_PROTO_RSN && wpa_sm_rsn_overriding_supported(sm)) {
+		if ((sm->ap_rsne_override && !ie->rsne_override) ||
+		    (!sm->ap_rsne_override && ie->rsne_override) ||
+		    (sm->ap_rsne_override && ie->rsne_override &&
+		     (sm->ap_rsne_override_len != ie->rsne_override_len ||
+		      os_memcmp(sm->ap_rsne_override, ie->rsne_override,
+				sm->ap_rsne_override_len) != 0))) {
+			wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
+				"RSN: RSNE Override element mismatch between Beacon/ProbeResp and EAPOL-Key msg 3/4");
+			wpa_hexdump(MSG_INFO,
+				    "RSNE Override element in Beacon/ProbeResp",
+				    sm->ap_rsne_override,
+				    sm->ap_rsne_override_len);
+			wpa_hexdump(MSG_INFO,
+				    "RSNE Override element in EAPOL-Key msg 3/4",
+				    ie->rsne_override, ie->rsne_override_len);
+			wpa_sm_deauthenticate(sm,
+					      WLAN_REASON_IE_IN_4WAY_DIFFERS);
+			return -1;
+		}
+
+		if ((sm->ap_rsne_override_2 && !ie->rsne_override_2) ||
+		    (!sm->ap_rsne_override_2 && ie->rsne_override_2) ||
+		    (sm->ap_rsne_override_2 && ie->rsne_override_2 &&
+		     (sm->ap_rsne_override_2_len != ie->rsne_override_2_len ||
+		      os_memcmp(sm->ap_rsne_override_2, ie->rsne_override_2,
+				sm->ap_rsne_override_2_len) != 0))) {
+			wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
+				"RSN: RSNE Override 2 element mismatch between Beacon/ProbeResp and EAPOL-Key msg 3/4");
+			wpa_hexdump(MSG_INFO,
+				    "RSNE Override 2 element in Beacon/ProbeResp",
+				    sm->ap_rsne_override_2,
+				    sm->ap_rsne_override_2_len);
+			wpa_hexdump(MSG_INFO,
+				    "RSNE Override 2 element in EAPOL-Key msg 3/4",
+				    ie->rsne_override_2, ie->rsne_override_2_len);
+			wpa_sm_deauthenticate(sm,
+					      WLAN_REASON_IE_IN_4WAY_DIFFERS);
+			return -1;
+		}
+
+		if ((sm->ap_rsnxe_override && !ie->rsnxe_override) ||
+		    (!sm->ap_rsnxe_override && ie->rsnxe_override) ||
+		    (sm->ap_rsnxe_override && ie->rsnxe_override &&
+		     (sm->ap_rsnxe_override_len != ie->rsnxe_override_len ||
+		      os_memcmp(sm->ap_rsnxe_override, ie->rsnxe_override,
+				sm->ap_rsnxe_override_len) != 0))) {
+			wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
+				"RSN: RSNXE Override element mismatch between Beacon/ProbeResp and EAPOL-Key msg 3/4");
+			wpa_hexdump(MSG_INFO,
+				    "RSNXE Override element in Beacon/ProbeResp",
+				    sm->ap_rsnxe_override,
+				    sm->ap_rsnxe_override_len);
+			wpa_hexdump(MSG_INFO,
+				    "RSNXE Override element in EAPOL-Key msg 3/4",
+				    ie->rsnxe_override, ie->rsnxe_override_len);
+			wpa_sm_deauthenticate(sm,
+					      WLAN_REASON_IE_IN_4WAY_DIFFERS);
+			return -1;
+		}
+	}
+
 #ifdef CONFIG_IEEE80211R
 	if (wpa_key_mgmt_ft(sm->key_mgmt) &&
 	    wpa_supplicant_validate_ie_ft(sm, src_addr, ie) < 0)
@@ -2165,7 +2320,10 @@ int wpa_supplicant_send_4_of_4(struct wpa_sm *sm, const unsigned char *dst,
 	struct wpa_eapol_key *reply;
 	u8 *rbuf, *key_mic;
 	u8 *kde = NULL;
-	size_t kde_len = 0;
+	size_t kde_len = 0, extra_len = 0;
+#ifdef CONFIG_TESTING_OPTIONS
+	size_t pad_len = 0;
+#endif /* CONFIG_TESTING_OPTIONS */
 
 	if (sm->mlo.valid_links) {
 		u8 *pos;
@@ -2182,10 +2340,22 @@ int wpa_supplicant_send_4_of_4(struct wpa_sm *sm, const unsigned char *dst,
 		kde_len = pos - kde;
 	}
 
+#ifdef CONFIG_TESTING_OPTIONS
+	if (sm->test_eapol_m4_elems)
+		extra_len = wpabuf_len(sm->test_eapol_m4_elems);
+	if (sm->encrypt_eapol_m4) {
+		pad_len = (kde_len + extra_len) % 8;
+		if (pad_len)
+			pad_len = 8 - pad_len;
+		extra_len += pad_len + 8;
+	}
+#endif /* CONFIG_TESTING_OPTIONS */
+
 	mic_len = wpa_mic_len(sm->key_mgmt, sm->pmk_len);
 	hdrlen = sizeof(*reply) + mic_len + 2;
 	rbuf = wpa_sm_alloc_eapol(sm, IEEE802_1X_TYPE_EAPOL_KEY, NULL,
-				  hdrlen + kde_len, &rlen, (void *) &reply);
+				  hdrlen + kde_len + extra_len, &rlen,
+				  (void *) &reply);
 	if (!rbuf) {
 		os_free(kde);
 		return -1;
@@ -2200,6 +2370,10 @@ int wpa_supplicant_send_4_of_4(struct wpa_sm *sm, const unsigned char *dst,
 		key_info |= WPA_KEY_INFO_MIC;
 	else
 		key_info |= WPA_KEY_INFO_ENCR_KEY_DATA;
+#ifdef CONFIG_TESTING_OPTIONS
+	if (sm->encrypt_eapol_m4)
+		key_info |= WPA_KEY_INFO_ENCR_KEY_DATA;
+#endif /* CONFIG_TESTING_OPTIONS */
 	WPA_PUT_BE16(reply->key_info, key_info);
 	if (sm->proto == WPA_PROTO_RSN || sm->proto == WPA_PROTO_OSEN)
 		WPA_PUT_BE16(reply->key_length, 0);
@@ -2209,11 +2383,51 @@ int wpa_supplicant_send_4_of_4(struct wpa_sm *sm, const unsigned char *dst,
 		  WPA_REPLAY_COUNTER_LEN);
 
 	key_mic = (u8 *) (reply + 1);
-	WPA_PUT_BE16(key_mic + mic_len, kde_len); /* Key Data length */
+	/* Key Data length */
+	WPA_PUT_BE16(key_mic + mic_len, kde_len + extra_len);
 	if (kde) {
 		os_memcpy(key_mic + mic_len + 2, kde, kde_len); /* Key Data */
 		os_free(kde);
 	}
+
+#ifdef CONFIG_TESTING_OPTIONS
+	if (sm->test_eapol_m4_elems) {
+		os_memcpy(key_mic + mic_len + 2 + kde_len,
+			  wpabuf_head(sm->test_eapol_m4_elems),
+			  wpabuf_len(sm->test_eapol_m4_elems));
+	}
+
+	if (sm->encrypt_eapol_m4) {
+		u8 *plain;
+		size_t plain_len;
+
+		if (sm->test_eapol_m4_elems)
+			extra_len = wpabuf_len(sm->test_eapol_m4_elems);
+		else
+			extra_len = 0;
+		plain_len = kde_len + extra_len + pad_len;
+		plain = os_memdup(key_mic + mic_len + 2, plain_len);
+		if (!plain) {
+			os_free(rbuf);
+			return -1;
+		}
+		if (pad_len)
+			plain[plain_len - pad_len] = 0xdd;
+
+		wpa_hexdump_key(MSG_DEBUG, "RSN: AES-WRAP using KEK",
+				ptk->kek, ptk->kek_len);
+		if (aes_wrap(ptk->kek, ptk->kek_len, plain_len / 8, plain,
+			     key_mic + mic_len + 2)) {
+			os_free(plain);
+			os_free(rbuf);
+			return -1;
+		}
+		wpa_hexdump(MSG_DEBUG,
+			    "RSN: Encrypted Key Data from AES-WRAP",
+			    key_mic + mic_len + 2, plain_len + 8);
+		os_free(plain);
+	}
+#endif /* CONFIG_TESTING_OPTIONS */
 
 	wpa_dbg(sm->ctx->msg_ctx, MSG_INFO, "WPA: Sending EAPOL-Key 4/4");
 	return wpa_eapol_key_send(sm, ptk, ver, dst, ETH_P_EAPOL, rbuf, rlen,
@@ -2223,10 +2437,14 @@ int wpa_supplicant_send_4_of_4(struct wpa_sm *sm, const unsigned char *dst,
 
 static int wpa_supplicant_validate_link_kde(struct wpa_sm *sm, u8 link_id,
 					    const u8 *link_kde,
-					    size_t link_kde_len)
+					    size_t link_kde_len,
+					    const u8 *rsn_override_link_kde,
+					    size_t rsn_override_link_kde_len)
 {
-	size_t rsne_len = 0, rsnxe_len = 0;
-	const u8 *rsne = NULL, *rsnxe = NULL;
+	size_t rsne_len = 0, rsnxe_len = 0, rsnoe_len = 0, rsno2e_len = 0,
+		rsnxoe_len = 0;
+	const u8 *rsne = NULL, *rsnxe = NULL, *rsnoe = NULL, *rsno2e = NULL,
+		*rsnxoe = NULL;
 
 	if (!link_kde ||
 	    link_kde_len < RSN_MLO_LINK_KDE_LINK_MAC_INDEX + ETH_ALEN) {
@@ -2287,14 +2505,14 @@ static int wpa_supplicant_validate_link_kde(struct wpa_sm *sm, u8 link_id,
 			       sm->mlo.links[link_id].ap_rsne_len,
 			       rsne, rsne_len)) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
-			"RSN MLO: IE in 3/4 msg does not match with IE in Beacon/ProbeResp for link ID %u",
+			"RSN MLO: RSNE in 3/4 msg does not match with IE in Beacon/ProbeResp for link ID %u",
 			link_id);
 		wpa_hexdump(MSG_INFO, "RSNE in Beacon/ProbeResp",
 			    sm->mlo.links[link_id].ap_rsne,
 			    sm->mlo.links[link_id].ap_rsne_len);
 		wpa_hexdump(MSG_INFO, "RSNE in EAPOL-Key msg 3/4",
 			    rsne, rsne_len);
-		return -1;
+		goto fail;
 	}
 
 	if ((sm->mlo.links[link_id].ap_rsnxe && !rsnxe) ||
@@ -2311,11 +2529,89 @@ static int wpa_supplicant_validate_link_kde(struct wpa_sm *sm, u8 link_id,
 			    sm->mlo.links[link_id].ap_rsnxe_len);
 		wpa_hexdump(MSG_INFO, "RSNXE in EAPOL-Key msg 3/4",
 			    rsnxe, rsnxe_len);
-		wpa_sm_deauthenticate(sm, WLAN_REASON_IE_IN_4WAY_DIFFERS);
-		return -1;
+		goto fail;
+	}
+
+	if (!wpa_sm_rsn_overriding_supported(sm))
+		return 0;
+
+	if (rsn_override_link_kde) {
+		rsnoe = get_vendor_ie(rsn_override_link_kde + 1,
+				      rsn_override_link_kde_len - 1,
+				      RSNE_OVERRIDE_IE_VENDOR_TYPE);
+		if (rsnoe)
+			rsnoe_len = 2 + rsnoe[1];
+
+		rsno2e = get_vendor_ie(rsn_override_link_kde + 1,
+				       rsn_override_link_kde_len - 1,
+				       RSNE_OVERRIDE_2_IE_VENDOR_TYPE);
+		if (rsno2e)
+			rsno2e_len = 2 + rsno2e[1];
+
+		rsnxoe = get_vendor_ie(rsn_override_link_kde + 1,
+				       rsn_override_link_kde_len - 1,
+				       RSNXE_OVERRIDE_IE_VENDOR_TYPE);
+		if (rsnxoe)
+			rsnxoe_len = 2 + rsnxoe[1];
+	}
+
+	if ((sm->mlo.links[link_id].ap_rsnoe && !rsnoe) ||
+	    (!sm->mlo.links[link_id].ap_rsnoe && rsnoe) ||
+	    (sm->mlo.links[link_id].ap_rsnoe && rsnoe &&
+	     wpa_compare_rsn_ie(wpa_key_mgmt_ft(sm->key_mgmt),
+				sm->mlo.links[link_id].ap_rsnoe,
+				sm->mlo.links[link_id].ap_rsnoe_len,
+				rsnoe, rsnoe_len))) {
+		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
+			"RSN MLO: RSNOE in 3/4 msg does not match with IE in Beacon/ProbeResp for link ID %u",
+			link_id);
+		wpa_hexdump(MSG_INFO, "RSNOE in Beacon/ProbeResp",
+			    sm->mlo.links[link_id].ap_rsnoe,
+			    sm->mlo.links[link_id].ap_rsnoe_len);
+		wpa_hexdump(MSG_INFO, "RSNOE in EAPOL-Key msg 3/4",
+			    rsnoe, rsnoe_len);
+		goto fail;
+	}
+
+	if ((sm->mlo.links[link_id].ap_rsno2e && !rsno2e) ||
+	    (!sm->mlo.links[link_id].ap_rsno2e && rsno2e) ||
+	    (sm->mlo.links[link_id].ap_rsno2e && rsno2e &&
+	     wpa_compare_rsn_ie(wpa_key_mgmt_ft(sm->key_mgmt),
+				sm->mlo.links[link_id].ap_rsno2e,
+				sm->mlo.links[link_id].ap_rsno2e_len,
+				rsno2e, rsno2e_len))) {
+		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
+			"RSN MLO: RSNO2E in 3/4 msg does not match with IE in Beacon/ProbeResp for link ID %u",
+			link_id);
+		wpa_hexdump(MSG_INFO, "RSNO2E in Beacon/ProbeResp",
+			    sm->mlo.links[link_id].ap_rsno2e,
+			    sm->mlo.links[link_id].ap_rsno2e_len);
+		wpa_hexdump(MSG_INFO, "RSNOE in EAPOL-Key msg 3/4",
+			    rsno2e, rsno2e_len);
+		goto fail;
+	}
+
+	if ((sm->mlo.links[link_id].ap_rsnxoe && !rsnxoe) ||
+	    (!sm->mlo.links[link_id].ap_rsnxoe && rsnxoe) ||
+	    (sm->mlo.links[link_id].ap_rsnxoe && rsnxoe &&
+	     (sm->mlo.links[link_id].ap_rsnxoe_len != rsnxoe_len ||
+	      os_memcmp(sm->mlo.links[link_id].ap_rsnxoe, rsnxoe,
+			sm->mlo.links[link_id].ap_rsnxoe_len) != 0))) {
+		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
+			"RSN MLO: RSNXOE mismatch between Beacon/ProbeResp and EAPOL-Key msg 3/4 for link ID %u",
+			link_id);
+		wpa_hexdump(MSG_INFO, "RSNXOE in Beacon/ProbeResp",
+			    sm->mlo.links[link_id].ap_rsnxoe,
+			    sm->mlo.links[link_id].ap_rsnxoe_len);
+		wpa_hexdump(MSG_INFO, "RSNXOE in EAPOL-Key msg 3/4",
+			    rsnxoe, rsnxoe_len);
+		goto fail;
 	}
 
 	return 0;
+fail:
+	wpa_sm_deauthenticate(sm, WLAN_REASON_IE_IN_4WAY_DIFFERS);
+	return -1;
 }
 
 
@@ -2328,7 +2624,7 @@ static int wpa_validate_mlo_ieee80211w_kdes(struct wpa_sm *sm,
 	    (unsigned int) wpa_cipher_key_len(sm->mgmt_group_cipher)) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
 			"RSN MLO: Invalid IGTK KDE length %lu for link ID %u",
-			(unsigned long) ie->mlo_igtk_len, link_id);
+			(unsigned long) ie->mlo_igtk_len[link_id], link_id);
 		return -1;
 	}
 
@@ -2340,7 +2636,7 @@ static int wpa_validate_mlo_ieee80211w_kdes(struct wpa_sm *sm,
 	    (unsigned int) wpa_cipher_key_len(sm->mgmt_group_cipher)) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_WARNING,
 			"RSN MLO: Invalid BIGTK KDE length %lu for link ID %u",
-			(unsigned long) ie->mlo_bigtk_len, link_id);
+			(unsigned long) ie->mlo_bigtk_len[link_id], link_id);
 		return -1;
 	}
 
@@ -2436,6 +2732,27 @@ static void wpa_supplicant_process_3_of_4(struct wpa_sm *sm,
 	if (wpa_supplicant_parse_ies(key_data, key_data_len, &ie) < 0)
 		goto failed;
 
+	if (sm->ssid_protection) {
+		if (!ie.ssid) {
+			wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
+				"RSN: No SSID included in EAPOL-Key msg 3/4");
+			goto failed;
+		}
+
+		if (ie.ssid_len != sm->ssid_len ||
+		    os_memcmp(ie.ssid, sm->ssid, sm->ssid_len) != 0) {
+			wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
+				"RSN: SSID mismatch in EAPOL-Key msg 3/4");
+			wpa_hexdump_ascii(MSG_DEBUG, "RSN: Received SSID",
+					  ie.ssid, ie.ssid_len);
+			wpa_hexdump_ascii(MSG_DEBUG, "RSN: Expected SSID",
+					  sm->ssid, sm->ssid_len);
+			goto failed;
+		}
+
+		wpa_sm_ssid_verified(sm);
+	}
+
 	if (mlo && !ie.valid_mlo_gtks) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
 			"MLO RSN: No GTK KDE included in EAPOL-Key msg 3/4");
@@ -2462,8 +2779,10 @@ static void wpa_supplicant_process_3_of_4(struct wpa_sm *sm,
 		if (!(sm->mlo.req_links & BIT(i)))
 			continue;
 
-		if (wpa_supplicant_validate_link_kde(sm, i, ie.mlo_link[i],
-						     ie.mlo_link_len[i]) < 0)
+		if (wpa_supplicant_validate_link_kde(
+			    sm, i, ie.mlo_link[i], ie.mlo_link_len[i],
+			    ie.rsn_override_link[i],
+			    ie.rsn_override_link_len[i]) < 0)
 			goto failed;
 
 		if (!(sm->mlo.valid_links & BIT(i)))
@@ -2819,10 +3138,7 @@ static void wpa_supplicant_process_mlo_1_of_2(struct wpa_sm *sm,
 		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
 			"MLO RSN: Failed to configure MLO IGTK");
 
-	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
-		if (!(sm->mlo.valid_links & BIT(i)))
-			continue;
-
+	for_each_link(sm->mlo.valid_links, i) {
 		/*
 		 * AP may send group keys for subset of the all links during
 		 * rekey
@@ -4041,9 +4357,15 @@ void wpa_sm_deinit(struct wpa_sm *sm)
 	os_free(sm->ap_wpa_ie);
 	os_free(sm->ap_rsn_ie);
 	os_free(sm->ap_rsnxe);
+	os_free(sm->ap_rsne_override);
+	os_free(sm->ap_rsne_override_2);
+	os_free(sm->ap_rsnxe_override);
 	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
 		os_free(sm->mlo.links[i].ap_rsne);
 		os_free(sm->mlo.links[i].ap_rsnxe);
+		os_free(sm->mlo.links[i].ap_rsnoe);
+		os_free(sm->mlo.links[i].ap_rsno2e);
+		os_free(sm->mlo.links[i].ap_rsnxoe);
 	}
 	wpa_sm_drop_sa(sm);
 	os_free(sm->ctx);
@@ -4052,6 +4374,8 @@ void wpa_sm_deinit(struct wpa_sm *sm)
 #endif /* CONFIG_IEEE80211R */
 #ifdef CONFIG_TESTING_OPTIONS
 	wpabuf_free(sm->test_assoc_ie);
+	wpabuf_free(sm->test_eapol_m2_elems);
+	wpabuf_free(sm->test_eapol_m4_elems);
 #endif /* CONFIG_TESTING_OPTIONS */
 #ifdef CONFIG_FILS_SK_PFS
 	crypto_ecdh_deinit(sm->fils_ecdh);
@@ -4357,6 +4681,20 @@ void wpa_sm_set_config(struct wpa_sm *sm, struct rsn_supp_config *config)
 }
 
 
+void wpa_sm_set_ssid(struct wpa_sm *sm, const u8 *ssid, size_t ssid_len)
+{
+	if (!sm)
+		return;
+
+	if (ssid) {
+		os_memcpy(sm->ssid, ssid, ssid_len);
+		sm->ssid_len = ssid_len;
+	} else {
+		sm->ssid_len = 0;
+	}
+}
+
+
 int wpa_sm_set_mlo_params(struct wpa_sm *sm, const struct wpa_sm_mlo *mlo)
 {
 	int i;
@@ -4429,6 +4767,69 @@ int wpa_sm_set_mlo_params(struct wpa_sm *sm, const struct wpa_sm_mlo *mlo)
 				return -1;
 			}
 			sm->mlo.links[i].ap_rsnxe_len = len;
+		}
+
+		ie = mlo->links[i].ap_rsnoe;
+		len = mlo->links[i].ap_rsnoe_len;
+		os_free(sm->mlo.links[i].ap_rsnoe);
+		if (!ie || len == 0) {
+			if (sm->mlo.links[i].ap_rsnoe)
+				wpa_dbg(sm->ctx->msg_ctx, MSG_DEBUG,
+					"RSN: Clearing MLO link[%u] AP RSNOE",
+					i);
+			sm->mlo.links[i].ap_rsnoe = NULL;
+			sm->mlo.links[i].ap_rsnoe_len = 0;
+		} else {
+			wpa_hexdump_link(MSG_DEBUG, i, "RSN: Set AP RSNOE",
+					 ie, len);
+			sm->mlo.links[i].ap_rsnoe = os_memdup(ie, len);
+			if (!sm->mlo.links[i].ap_rsnoe) {
+				sm->mlo.links[i].ap_rsnoe_len = 0;
+				return -1;
+			}
+			sm->mlo.links[i].ap_rsnoe_len = len;
+		}
+
+		ie = mlo->links[i].ap_rsno2e;
+		len = mlo->links[i].ap_rsno2e_len;
+		os_free(sm->mlo.links[i].ap_rsno2e);
+		if (!ie || len == 0) {
+			if (sm->mlo.links[i].ap_rsno2e)
+				wpa_dbg(sm->ctx->msg_ctx, MSG_DEBUG,
+					"RSN: Clearing MLO link[%u] AP RSNO2E",
+					i);
+			sm->mlo.links[i].ap_rsno2e = NULL;
+			sm->mlo.links[i].ap_rsno2e_len = 0;
+		} else {
+			wpa_hexdump_link(MSG_DEBUG, i, "RSN: Set AP RSNO2E",
+					 ie, len);
+			sm->mlo.links[i].ap_rsno2e = os_memdup(ie, len);
+			if (!sm->mlo.links[i].ap_rsno2e) {
+				sm->mlo.links[i].ap_rsno2e_len = 0;
+				return -1;
+			}
+			sm->mlo.links[i].ap_rsno2e_len = len;
+		}
+
+		ie = mlo->links[i].ap_rsnxoe;
+		len = mlo->links[i].ap_rsnxoe_len;
+		os_free(sm->mlo.links[i].ap_rsnxoe);
+		if (!ie || len == 0) {
+			if (sm->mlo.links[i].ap_rsnxoe)
+				wpa_dbg(sm->ctx->msg_ctx, MSG_DEBUG,
+					"RSN: Clearing MLO link[%u] AP RSNXOE",
+					i);
+			sm->mlo.links[i].ap_rsnxoe = NULL;
+			sm->mlo.links[i].ap_rsnxoe_len = 0;
+		} else {
+			wpa_hexdump_link(MSG_DEBUG, i, "RSN: Set AP RSNXOE",
+					 ie, len);
+			sm->mlo.links[i].ap_rsnxoe = os_memdup(ie, len);
+			if (!sm->mlo.links[i].ap_rsnxoe) {
+				sm->mlo.links[i].ap_rsnxoe_len = 0;
+				return -1;
+			}
+			sm->mlo.links[i].ap_rsnxoe_len = len;
 		}
 	}
 
@@ -4568,6 +4969,12 @@ int wpa_sm_set_param(struct wpa_sm *sm, enum wpa_sm_conf_params param,
 	case WPA_PARAM_DISABLE_EAPOL_G2_TX:
 		sm->disable_eapol_g2_tx = value;
 		break;
+	case WPA_PARAM_ENCRYPT_EAPOL_M2:
+		sm->encrypt_eapol_m2 = value;
+		break;
+	case WPA_PARAM_ENCRYPT_EAPOL_M4:
+		sm->encrypt_eapol_m4 = value;
+		break;
 #endif /* CONFIG_TESTING_OPTIONS */
 #ifdef CONFIG_DPP2
 	case WPA_PARAM_DPP_PFS:
@@ -4580,11 +4987,40 @@ int wpa_sm_set_param(struct wpa_sm *sm, enum wpa_sm_conf_params param,
 	case WPA_PARAM_WMM_ENABLED:
 		sm->wmm_enabled = value;
 		break;
+	case WPA_PARAM_FT_PREPEND_PMKID:
+		sm->ft_prepend_pmkid = value;
+		break;
+	case WPA_PARAM_SSID_PROTECTION:
+		sm->ssid_protection = value;
+		break;
+	case WPA_PARAM_RSN_OVERRIDE:
+		sm->rsn_override = value;
+		break;
+	case WPA_PARAM_RSN_OVERRIDE_SUPPORT:
+		sm->rsn_override_support = value;
+		break;
 	default:
 		break;
 	}
 
 	return ret;
+}
+
+
+static const u8 * wpa_sm_get_ap_rsne(struct wpa_sm *sm, size_t *len)
+{
+	if (sm->rsn_override == RSN_OVERRIDE_RSNE_OVERRIDE) {
+		*len = sm->ap_rsne_override_len;
+		return sm->ap_rsne_override;
+	}
+
+	if (sm->rsn_override == RSN_OVERRIDE_RSNE_OVERRIDE_2) {
+		*len = sm->ap_rsne_override_2_len;
+		return sm->ap_rsne_override_2;
+	}
+
+	*len = sm->ap_rsn_ie_len;
+	return sm->ap_rsn_ie;
 }
 
 
@@ -4605,6 +5041,10 @@ int wpa_sm_get_status(struct wpa_sm *sm, char *buf, size_t buflen,
 {
 	char *pos = buf, *end = buf + buflen;
 	int ret;
+	const u8 *rsne;
+	size_t rsne_len;
+
+	rsne = wpa_sm_get_ap_rsne(sm, &rsne_len);
 
 	ret = os_snprintf(pos, end - pos,
 			  "pairwise_cipher=%s\n"
@@ -4626,10 +5066,10 @@ int wpa_sm_get_status(struct wpa_sm *sm, char *buf, size_t buflen,
 	}
 #endif /* CONFIG_DPP2 */
 
-	if (sm->mfp != NO_MGMT_FRAME_PROTECTION && sm->ap_rsn_ie) {
+	if (sm->mfp != NO_MGMT_FRAME_PROTECTION && rsne) {
 		struct wpa_ie_data rsn;
-		if (wpa_parse_wpa_ie_rsn(sm->ap_rsn_ie, sm->ap_rsn_ie_len, &rsn)
-		    >= 0 &&
+
+		if (wpa_parse_wpa_ie_rsn(rsne, rsne_len, &rsn) >= 0 &&
 		    rsn.capabilities & (WPA_CAPABILITY_MFPR |
 					WPA_CAPABILITY_MFPC)) {
 			ret = os_snprintf(pos, end - pos, "pmf=%d\n"
@@ -4651,15 +5091,30 @@ int wpa_sm_get_status(struct wpa_sm *sm, char *buf, size_t buflen,
 int wpa_sm_pmf_enabled(struct wpa_sm *sm)
 {
 	struct wpa_ie_data rsn;
+	const u8 *rsne;
+	size_t rsne_len;
 
-	if (sm->mfp == NO_MGMT_FRAME_PROTECTION || !sm->ap_rsn_ie)
+	rsne = wpa_sm_get_ap_rsne(sm, &rsne_len);
+
+	if (sm->mfp == NO_MGMT_FRAME_PROTECTION || !rsne)
 		return 0;
 
-	if (wpa_parse_wpa_ie_rsn(sm->ap_rsn_ie, sm->ap_rsn_ie_len, &rsn) >= 0 &&
+	if (wpa_parse_wpa_ie_rsn(rsne, rsne_len, &rsn) >= 0 &&
 	    rsn.capabilities & (WPA_CAPABILITY_MFPR | WPA_CAPABILITY_MFPC))
 		return 1;
 
 	return 0;
+}
+
+
+bool wpa_sm_rsn_overriding_supported(struct wpa_sm *sm)
+{
+	const u8 *rsne;
+	size_t rsne_len;
+
+	rsne = wpa_sm_get_ap_rsne(sm, &rsne_len);
+
+	return sm->rsn_override_support && rsne;
 }
 
 
@@ -4678,12 +5133,14 @@ int wpa_sm_ext_key_id_active(struct wpa_sm *sm)
 int wpa_sm_ocv_enabled(struct wpa_sm *sm)
 {
 	struct wpa_ie_data rsn;
+	const u8 *rsne;
+	size_t rsne_len;
 
-	if (!sm->ocv || !sm->ap_rsn_ie)
+	rsne = wpa_sm_get_ap_rsne(sm, &rsne_len);
+	if (!sm->ocv || !rsne)
 		return 0;
 
-	return wpa_parse_wpa_ie_rsn(sm->ap_rsn_ie, sm->ap_rsn_ie_len,
-				    &rsn) >= 0 &&
+	return wpa_parse_wpa_ie_rsn(rsne, rsne_len, &rsn) >= 0 &&
 		(rsn.capabilities & WPA_CAPABILITY_OCVC);
 }
 
@@ -4851,6 +5308,14 @@ int wpa_sm_set_assoc_rsnxe(struct wpa_sm *sm, const u8 *ie, size_t len)
 		sm->assoc_rsnxe_len = len;
 	}
 
+	if (sm->ssid_protection &&
+	    !ieee802_11_rsnx_capab(sm->assoc_rsnxe,
+				   WLAN_RSNX_CAPAB_SSID_PROTECTION)) {
+		wpa_dbg(sm->ctx->msg_ctx, MSG_DEBUG,
+			"RSN: Disabling SSID protection based on own RSNXE update");
+		sm->ssid_protection = 0;
+	}
+
 	return 0;
 }
 
@@ -4950,6 +5415,81 @@ int wpa_sm_set_ap_rsnxe(struct wpa_sm *sm, const u8 *ie, size_t len)
 			return -1;
 
 		sm->ap_rsnxe_len = len;
+	}
+
+	return 0;
+}
+
+
+int wpa_sm_set_ap_rsne_override(struct wpa_sm *sm, const u8 *ie, size_t len)
+{
+	if (!sm)
+		return -1;
+
+	os_free(sm->ap_rsne_override);
+	if (!ie || len == 0) {
+		wpa_dbg(sm->ctx->msg_ctx, MSG_DEBUG,
+			"RSN: Clearing AP RSNE Override element");
+		sm->ap_rsne_override = NULL;
+		sm->ap_rsne_override_len = 0;
+	} else {
+		wpa_hexdump(MSG_DEBUG, "RSN: Set AP RSNE Override element",
+			    ie, len);
+		sm->ap_rsne_override = os_memdup(ie, len);
+		if (!sm->ap_rsne_override)
+			return -1;
+
+		sm->ap_rsne_override_len = len;
+	}
+
+	return 0;
+}
+
+
+int wpa_sm_set_ap_rsne_override_2(struct wpa_sm *sm, const u8 *ie, size_t len)
+{
+	if (!sm)
+		return -1;
+
+	os_free(sm->ap_rsne_override_2);
+	if (!ie || len == 0) {
+		wpa_dbg(sm->ctx->msg_ctx, MSG_DEBUG,
+			"RSN: Clearing AP RSNE Override 2 element");
+		sm->ap_rsne_override_2 = NULL;
+		sm->ap_rsne_override_2_len = 0;
+	} else {
+		wpa_hexdump(MSG_DEBUG, "RSN: Set AP RSNE Override 2 element",
+			    ie, len);
+		sm->ap_rsne_override_2 = os_memdup(ie, len);
+		if (!sm->ap_rsne_override_2)
+			return -1;
+
+		sm->ap_rsne_override_2_len = len;
+	}
+
+	return 0;
+}
+
+
+int wpa_sm_set_ap_rsnxe_override(struct wpa_sm *sm, const u8 *ie, size_t len)
+{
+	if (!sm)
+		return -1;
+
+	os_free(sm->ap_rsnxe_override);
+	if (!ie || len == 0) {
+		wpa_dbg(sm->ctx->msg_ctx, MSG_DEBUG,
+			"RSN: Clearing AP RSNXE Override element");
+		sm->ap_rsnxe_override = NULL;
+		sm->ap_rsnxe_override_len = 0;
+	} else {
+		wpa_hexdump(MSG_DEBUG, "RSN: Set AP RSNXE Override element",
+			    ie, len);
+		sm->ap_rsnxe_override = os_memdup(ie, len);
+		if (!sm->ap_rsnxe_override)
+			return -1;
+
+		sm->ap_rsnxe_override_len = len;
 	}
 
 	return 0;
@@ -5277,6 +5817,20 @@ void wpa_sm_set_test_assoc_ie(struct wpa_sm *sm, struct wpabuf *buf)
 {
 	wpabuf_free(sm->test_assoc_ie);
 	sm->test_assoc_ie = buf;
+}
+
+
+void wpa_sm_set_test_eapol_m2_elems(struct wpa_sm *sm, struct wpabuf *buf)
+{
+	wpabuf_free(sm->test_eapol_m2_elems);
+	sm->test_eapol_m2_elems = buf;
+}
+
+
+void wpa_sm_set_test_eapol_m4_elems(struct wpa_sm *sm, struct wpabuf *buf)
+{
+	wpabuf_free(sm->test_eapol_m4_elems);
+	sm->test_eapol_m4_elems = buf;
 }
 
 
