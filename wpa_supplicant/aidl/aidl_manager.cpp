@@ -1808,7 +1808,11 @@ void AidlManager::notifyDppConfigReceived(struct wpa_supplicant *wpa_s,
 		return;
 	}
 
-	aidl_dpp_config_data.password = misc_utils::charBufToString(config->passphrase);
+	if (aidl_dpp_config_data.securityAkm == DppAkm::SAE)
+		aidl_dpp_config_data.password = misc_utils::charBufToString(config->sae_password);
+	else
+		aidl_dpp_config_data.password = misc_utils::charBufToString(config->passphrase);
+
 	aidl_dpp_config_data.psk = byteArrToVec(config->psk, 32);
 	std::vector<uint8_t> aidl_ssid(
 		config->ssid,
