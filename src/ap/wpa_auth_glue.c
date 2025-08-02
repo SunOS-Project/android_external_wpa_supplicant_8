@@ -1658,6 +1658,15 @@ static int hostapd_wpa_auth_get_drv_flags(void *ctx,
 }
 
 
+static int hostapd_wpa_auth_remove_pmkid(void *ctx, const u8 *sta_addr,
+					 const u8 *pmkid)
+{
+	struct hostapd_data *hapd = ctx;
+
+	return hostapd_remove_pmkid(hapd, sta_addr, pmkid);
+}
+
+
 int hostapd_setup_wpa(struct hostapd_data *hapd)
 {
 	struct wpa_auth_config _conf;
@@ -1712,6 +1721,7 @@ int hostapd_setup_wpa(struct hostapd_data *hapd)
 		.get_ml_key_info = hostapd_wpa_auth_get_ml_key_info,
 #endif /* CONFIG_IEEE80211BE */
 		.get_drv_flags = hostapd_wpa_auth_get_drv_flags,
+		.remove_pmkid = hostapd_wpa_auth_remove_pmkid,
 	};
 	const u8 *wpa_ie;
 	size_t wpa_ie_len;
